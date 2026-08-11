@@ -84,7 +84,6 @@ function DirectoryPicker({
         >
           <Field>
             <Field.Input
-              autoFocus
               aria-label={
                 allowDirectPath ? "Search folders or enter a path" : "Search recent folders"
               }
@@ -104,22 +103,20 @@ function DirectoryPicker({
             variant="primary"
             disabled={isPending || (!canSubmitDirectPath && visibleDirectories.length === 0)}
           >
-            Add
+            Use folder
           </Button>
         </form>
 
         <div className="px-control-pad-x">
           <Text as="div" size="xs" tone="faint" weight="regular">
-            Recents
+            Recent folders
           </Text>
         </div>
         <div {...stylex.props(intrinsicStyles.recentListBounds)}>
           <div className="flex max-h-[inherit] min-h-0 flex-col overflow-y-auto [scrollbar-width:thin]">
             {visibleDirectories.length === 0 ? (
               <div className="px-control-pad-x py-panel-pad font-ui text-detail text-faint">
-                {canSubmitDirectPath
-                  ? "Press Enter to attach this path."
-                  : "No matching recent folders."}
+                {canSubmitDirectPath ? "Press Enter to use this folder." : "No matching folders."}
               </div>
             ) : (
               visibleDirectories.map((path) => (
@@ -150,7 +147,7 @@ function DirectoryPicker({
               <ListRow.Slot>
                 <Icon icon={IconFolderOpen} size="sm" tone="muted" />
               </ListRow.Slot>
-              <ListRow.Title>Open Folder…</ListRow.Title>
+              <ListRow.Title>Choose folder…</ListRow.Title>
             </ListRow>
           </div>
         ) : null}

@@ -54,15 +54,15 @@ function computeSafeZone(
   const rect = floatingRect;
   const refRect = triggerRect;
   const cursorLeaveFromBottom = exit.y > rect.bottom - rectHeight(rect) / 2;
-  const isFloatingTaller = rectHeight(rect) > rectHeight(refRect);
+  const floatingTaller = rectHeight(rect) > rectHeight(refRect);
 
-  const cursorYOffset = isFloatingTaller ? SAFE_POLYGON_BUFFER_PX / 2 : SAFE_POLYGON_BUFFER_PX * 4;
-  const cursorPointOneY = isFloatingTaller
+  const cursorYOffset = floatingTaller ? SAFE_POLYGON_BUFFER_PX / 2 : SAFE_POLYGON_BUFFER_PX * 4;
+  const cursorPointOneY = floatingTaller
     ? exit.y + cursorYOffset
     : cursorLeaveFromBottom
       ? exit.y + cursorYOffset
       : exit.y - cursorYOffset;
-  const cursorPointTwoY = isFloatingTaller
+  const cursorPointTwoY = floatingTaller
     ? exit.y - cursorYOffset
     : cursorLeaveFromBottom
       ? exit.y + cursorYOffset
@@ -73,11 +73,11 @@ function computeSafeZone(
     const cursorPointX = exit.x - SAFE_POLYGON_BUFFER_PX;
     const commonXTop = cursorLeaveFromBottom
       ? rect.left + SAFE_POLYGON_BUFFER_PX
-      : isFloatingTaller
+      : floatingTaller
         ? rect.left + SAFE_POLYGON_BUFFER_PX
         : rect.right;
     const commonXBottom = cursorLeaveFromBottom
-      ? isFloatingTaller
+      ? floatingTaller
         ? rect.left + SAFE_POLYGON_BUFFER_PX
         : rect.right
       : rect.left + SAFE_POLYGON_BUFFER_PX;
@@ -91,11 +91,11 @@ function computeSafeZone(
     const cursorPointX = exit.x + SAFE_POLYGON_BUFFER_PX + 1;
     const commonXTop = cursorLeaveFromBottom
       ? rect.right - SAFE_POLYGON_BUFFER_PX
-      : isFloatingTaller
+      : floatingTaller
         ? rect.right - SAFE_POLYGON_BUFFER_PX
         : rect.left;
     const commonXBottom = cursorLeaveFromBottom
-      ? isFloatingTaller
+      ? floatingTaller
         ? rect.right - SAFE_POLYGON_BUFFER_PX
         : rect.left
       : rect.right - SAFE_POLYGON_BUFFER_PX;
@@ -108,8 +108,8 @@ function computeSafeZone(
   }
 
   // The trough is clamped to the shorter element's vertical extent.
-  const troughTop = (isFloatingTaller ? refRect : rect).top;
-  const troughBottom = (isFloatingTaller ? refRect : rect).bottom;
+  const troughTop = (floatingTaller ? refRect : rect).top;
+  const troughBottom = (floatingTaller ? refRect : rect).bottom;
   const trough: Rect =
     side === "right"
       ? { left: refRect.right - 1, right: rect.left + 1, top: troughTop, bottom: troughBottom }

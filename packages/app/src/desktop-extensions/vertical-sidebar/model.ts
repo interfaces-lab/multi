@@ -1,18 +1,7 @@
 import type { TabDescriptor } from "@honk/ui";
 
-export const STATUS_FILTER_OPTIONS = [
-  { value: "working", label: "Working" },
-  { value: "needs-you", label: "Needs you" },
-  { value: "idle", label: "Idle" },
-  { value: "done", label: "Done" },
-  { value: "failed", label: "Failed" },
-  { value: "draft", label: "Draft" },
-] as const satisfies readonly {
-  readonly value: TabDescriptor["status"];
-  readonly label: string;
-}[];
+import type { StatusFilter } from "./extension";
 
-export type StatusFilter = (typeof STATUS_FILTER_OPTIONS)[number]["value"];
 export type SidebarTab = Exclude<TabDescriptor, { readonly kind: "home" }>;
 export type ScrollFadeEdges = { readonly showTop: boolean; readonly showBottom: boolean };
 
@@ -36,16 +25,14 @@ export type WorkspaceTabGroup = {
   readonly key: string;
   readonly label: string;
   readonly path?: string;
-  readonly serverLabel?: string;
   readonly tabs: readonly { readonly tab: SidebarTab; readonly index: number }[];
 };
 
 export function workspaceKey(tab: SidebarTab): string {
-  const server = tab.server === undefined ? "default" : `${tab.server.kind}:${tab.server.label}`;
-  return `${server}\u0000${tab.path ?? `${tab.repository.state}:${tab.key}`}`;
+  return tab.path ?? `${tab.repository.state}:${tab.key}`;
 }
 
-export function isPathBackedGroup(group: WorkspaceTabGroup): boolean {
+export function groupHasPath(group: WorkspaceTabGroup): boolean {
   return group.tabs[0]?.tab.path !== undefined;
 }
 
@@ -62,7 +49,6 @@ export function groupWorkspaceTabs(tabs: readonly TabDescriptor[]): readonly Wor
       key,
       label: workspaceLabel(tab),
       ...(tab.path === undefined ? {} : { path: tab.path }),
-      ...(tab.server === undefined ? {} : { serverLabel: tab.server.label }),
       tabs: [{ tab, index }],
     });
     return result;
@@ -76,7 +62,7 @@ export function groupWorkspaceTabs(tabs: readonly TabDescriptor[]): readonly Wor
 }
 
 export function tabMatchesFilters(tab: SidebarTab, filters: readonly StatusFilter[]): boolean {
-  return filters.length === 0 || filters.includes(tab.status);
+  return filters.length === 0 || filters.some((filter) => filter === tab.status);
 }
 
 export function mergeWorkspaceOrder(
@@ -163,7 +149,7 @@ export function buildWorkspaceDrop(options: {
   readonly cap: number;
 }): readonly string[] {
   const knownKeys = new Set(options.groups.map((group) => group.key));
-  const mountedKeys = options.groups.filter(isPathBackedGroup).map((group) => group.key);
+  const mountedKeys = options.groups.filter(groupHasPath).map((group) => group.key);
   const mounted = new Set(mountedKeys);
   const fullOrder = [
     ...options.rankedKeys.filter((key) => !knownKeys.has(key) || mounted.has(key)),
@@ -189,7 +175,7 @@ export function toggleCollapsedKey(
   const next = new Set(current);
   if (next.has(key)) next.delete(key);
   else next.add(key);
-  const mountedKeys = groups.filter(isPathBackedGroup).map((group) => group.key);
+  const mountedKeys = groups.filter(groupHasPath).map((group) => group.key);
   return prunePersistedOrder([...next], mountedKeys, cap);
 }
 
@@ -200,7 +186,7 @@ export function collapsedKeySet(
   persistedKeys: readonly string[],
   ephemeralKeys: readonly string[],
 ): ReadonlySet<string> {
-  const knownGroups = new Map(groups.map((group) => [group.key, isPathBackedGroup(group)]));
+  const knownGroups = new Map(groups.map((group) => [group.key, groupHasPath(group)]));
   return new Set([
     ...persistedKeys.filter((key) => knownGroups.get(key) === true),
     ...ephemeralKeys.filter((key) => knownGroups.get(key) === false),
@@ -213,7 +199,7 @@ export function toggleSessionCollapsedKey(
   groups: readonly WorkspaceTabGroup[],
 ): readonly string[] {
   const knownKeys = new Set(
-    groups.filter((group) => !isPathBackedGroup(group)).map((group) => group.key),
+    groups.filter((group) => !groupHasPath(group)).map((group) => group.key),
   );
   const next = new Set(current.filter((candidate) => knownKeys.has(candidate)));
   if (next.has(key)) next.delete(key);
@@ -254,18 +240,6 @@ export function statusLabel(status: TabDescriptor["status"]): string {
     case "idle":
       return "Idle";
   }
-}
-
-export function decodeStringList(value: unknown): readonly string[] | undefined {
-  if (!Array.isArray(value) || value.some((item) => typeof item !== "string")) return undefined;
-  return Object.freeze([...new Set(value)]);
-}
-
-export function decodeStatusFilters(value: unknown): readonly StatusFilter[] | undefined {
-  if (!Array.isArray(value)) return undefined;
-  const allowed = new Set<string>(STATUS_FILTER_OPTIONS.map((option) => option.value));
-  if (value.some((item) => typeof item !== "string" || !allowed.has(item))) return undefined;
-  return Object.freeze([...new Set(value)] as StatusFilter[]);
 }
 
 function workspaceLabel(tab: SidebarTab): string {

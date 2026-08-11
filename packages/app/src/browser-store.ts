@@ -1,4 +1,3 @@
-import { openCodeSessionKey, type OpenCodeSessionRef } from "@honk/opencode";
 import type { DesktopBrowserViewState } from "@honk/shared/desktop-api";
 
 import { readDesktopBrowserAvailability } from "./desktop-bridge";
@@ -38,8 +37,10 @@ const INITIAL_BROWSER_SNAPSHOT: BrowserSnapshot = Object.freeze({
   canPictureInPicture: false,
 });
 
+// The owner key is the core session identity. The store only needs it to be
+// stable and unique.
 type BrowserResourceEntry = {
-  readonly owner: OpenCodeSessionRef;
+  readonly ownerKey: string;
   readonly resourceID: string;
   readonly resource: BrowserResource;
 };
@@ -54,11 +55,8 @@ const resources = new Map<string, BrowserResourceEntry>();
 const pendingDestroys = new Map<string, PendingBrowserDestroy>();
 let browserViewEventsUnsubscribe: (() => void) | null = null;
 
-function browserResourceID(
-  ref: OpenCodeSessionRef,
-  resourceID = BROWSER_AUTOMATION_RESOURCE_ID,
-): string {
-  return JSON.stringify([openCodeSessionKey(ref), resourceID]);
+function browserResourceID(ownerKey: string, resourceID = BROWSER_AUTOMATION_RESOURCE_ID): string {
+  return JSON.stringify([ownerKey, resourceID]);
 }
 
 function createBrowserResource(): BrowserResource {
@@ -131,27 +129,27 @@ function applyBrowserViewState(state: DesktopBrowserViewState): void {
 }
 
 function installBrowserViewEvents(): void {
-  if (browserViewEventsUnsubscribe !== null || typeof window === "undefined") return;
+  if (browserViewEventsUnsubscribe !== null || globalThis.window === undefined) return;
   const availability = readDesktopBrowserAvailability();
   if (availability.status !== "ready") return;
   browserViewEventsUnsubscribe = availability.bridge.onBrowserViewState(applyBrowserViewState);
 }
 
 function browserResourceFor(
-  ref: OpenCodeSessionRef,
+  ownerKey: string,
   resourceID = BROWSER_AUTOMATION_RESOURCE_ID,
 ): BrowserResource {
   installBrowserViewEvents();
-  const key = browserResourceID(ref, resourceID);
+  const key = browserResourceID(ownerKey, resourceID);
   const existing = resources.get(key)?.resource;
   if (existing !== undefined) return existing;
   const created = createBrowserResource();
-  resources.set(key, { owner: ref, resourceID, resource: created });
+  resources.set(key, { ownerKey, resourceID, resource: created });
   return created;
 }
 
-function removeBrowserResource(ref: OpenCodeSessionRef, resourceID: string): void {
-  removeBrowserResourceByID(browserResourceID(ref, resourceID));
+function removeBrowserResource(ownerKey: string, resourceID: string): void {
+  removeBrowserResourceByID(browserResourceID(ownerKey, resourceID));
 }
 
 function removeBrowserResourceByID(browserId: string): void {
@@ -160,7 +158,7 @@ function removeBrowserResourceByID(browserId: string): void {
   resources.delete(browserId);
   const pending = pendingDestroys.get(browserId) ?? { entry, request: null };
   pendingDestroys.set(browserId, pending);
-  if (pending.request !== null || typeof window === "undefined") return;
+  if (pending.request !== null || globalThis.window === undefined) return;
   const availability = readDesktopBrowserAvailability();
   if (availability.status !== "ready") return;
   const request = availability.bridge.destroyBrowserView({ browserId });
@@ -177,17 +175,11 @@ function removeBrowserResourceByID(browserId: string): void {
   );
 }
 
-function removeBrowserSessions(
-  server: OpenCodeSessionRef["server"],
-  sessionIDs: readonly string[],
-): void {
-  const closing = new Set(sessionIDs);
+/** Removes the automation-owned resource of each named owner; user-opened browser tabs stay. */
+function removeBrowserOwners(ownerKeys: readonly string[]): void {
+  const closing = new Set(ownerKeys);
   for (const [browserId, entry] of resources) {
-    if (
-      entry.resourceID !== BROWSER_AUTOMATION_RESOURCE_ID ||
-      entry.owner.server !== server ||
-      !closing.has(entry.owner.sessionID)
-    ) {
+    if (entry.resourceID !== BROWSER_AUTOMATION_RESOURCE_ID || !closing.has(entry.ownerKey)) {
       continue;
     }
     removeBrowserResourceByID(browserId);
@@ -195,25 +187,25 @@ function removeBrowserSessions(
   for (const [browserId, pending] of pendingDestroys) {
     if (
       pending.entry.resourceID === BROWSER_AUTOMATION_RESOURCE_ID &&
-      pending.entry.owner.server === server &&
-      closing.has(pending.entry.owner.sessionID)
+      closing.has(pending.entry.ownerKey)
     ) {
       removeBrowserResourceByID(browserId);
     }
   }
 }
 
-function removeBrowserServer(server: OpenCodeSessionRef["server"]): void {
+/** Removes every resource whose owner matches, automation- and user-owned alike. */
+function removeBrowserOwnersWhere(matches: (ownerKey: string) => boolean): void {
   for (const [browserId, entry] of resources) {
-    if (entry.owner.server === server) removeBrowserResourceByID(browserId);
+    if (matches(entry.ownerKey)) removeBrowserResourceByID(browserId);
   }
   for (const [browserId, pending] of pendingDestroys) {
-    if (pending.entry.owner.server === server) removeBrowserResourceByID(browserId);
+    if (matches(pending.entry.ownerKey)) removeBrowserResourceByID(browserId);
   }
 }
 
-function requestBrowserOpen(ref: OpenCodeSessionRef, url?: string): void {
-  const resource = browserResourceFor(ref);
+function requestBrowserOpen(ownerKey: string, url?: string): void {
+  const resource = browserResourceFor(ownerKey);
   if (url !== undefined) resource.requestNavigation(url);
 }
 
@@ -229,9 +221,9 @@ export {
   applyBrowserViewState,
   browserResourceID,
   browserResourceFor,
+  removeBrowserOwners,
+  removeBrowserOwnersWhere,
   removeBrowserResource,
-  removeBrowserServer,
-  removeBrowserSessions,
   requestBrowserOpen,
   resetBrowserStoreForTests,
 };

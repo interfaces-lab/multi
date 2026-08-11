@@ -10,6 +10,7 @@
     "**/routeTree.gen.ts",
     "**/*.generated.ts",
     "**/mockServiceWorker.js",
+    "**/platform-tokens.css",
     "**/vscode-icons-manifest.json"
   ],
   "sortPackageJson": {}

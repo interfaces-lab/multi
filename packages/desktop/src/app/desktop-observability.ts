@@ -130,8 +130,7 @@ export const backendOutputLogLayer = Layer.effect(
   ),
 );
 
-// OTEL header convention (`key=value,key2=value2`). Same format OpenCode's sidecar
-// parses for OTEL_EXPORTER_OTLP_HEADERS, so one env recipe serves both processes.
+// OTEL header convention (`key=value,key2=value2`), matching OTEL_EXPORTER_OTLP_HEADERS.
 const parseOtlpHeaders = (raw: string): Record<string, string> => {
   const headers: Record<string, string> = {};
   for (const entry of raw.split(",")) {
@@ -165,7 +164,6 @@ const desktopLoggerLayer = Layer.unwrap(
     ];
 
     // Optional OTLP log export (HONK_OTLP_LOGS_URL) beside local file/console loggers.
-    // Honk logs only. The OpenCode sidecar has its own env-gated exporter.
     // Same resource identity as the OTLP tracer delegate below.
     if (Option.isSome(environment.otlpLogsUrl)) {
       loggers.push(

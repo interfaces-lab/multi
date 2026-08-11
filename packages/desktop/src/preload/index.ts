@@ -1,35 +1,36 @@
 import { contextBridge, ipcRenderer, type IpcRendererEvent } from "electron";
+import type { HonkConnection } from "@honk/core";
 import type { BrowserAutomationOpenRequest } from "@honk/shared/browser-automation";
-import type { TerminalOpenRequest } from "@honk/shared/terminal";
 import {
   type DesktopAppBranding,
   type DesktopBridge,
   type DesktopBrowserViewState,
   type DesktopPtyBridge,
+  type DesktopRemoteDevice,
+  type DesktopRemotePairingInvitation,
+  type DesktopRemotePairingState,
   type DesktopRendererDiagnosticInput,
+  type DesktopTailscaleRemoteAccessState,
   type DesktopThreadNotificationInput,
   type DesktopThreadNotificationTarget,
   type DesktopUpdateState,
   type DesktopWindowChromeState,
 } from "@honk/shared/desktop-api";
 
-interface DesktopAuxEndpoint {
-  readonly baseUrl: string;
-  readonly bearer: string;
-}
+type RendererStartupMilestone = "renderer-authenticated";
 
-interface DesktopOpencodeSidecarEndpoint {
-  readonly status: "idle" | "starting" | "ready" | "restarting" | "stopped" | "error";
-  readonly url: string | null;
-  readonly password: string | null;
-}
-
-type RendererStartupMilestone = "renderer-sidecar-ready" | "renderer-authenticated";
-
-type DesktopBridgeWithAux = DesktopBridge<never> & {
-  readonly getAuxEndpoint: () => Promise<DesktopAuxEndpoint | null>;
-  readonly getHonkCoreEndpoint: () => Promise<{ readonly baseUrl: string }>;
-  readonly getOpencodeSidecar: () => Promise<DesktopOpencodeSidecarEndpoint>;
+type DesktopBridgeWithCore = DesktopBridge<never> & {
+  readonly getHonkCoreConnection: () => Promise<HonkConnection>;
+  readonly getTailscaleRemoteAccess: () => Promise<DesktopTailscaleRemoteAccessState>;
+  readonly enableTailscaleRemoteAccess: () => Promise<DesktopTailscaleRemoteAccessState>;
+  readonly disableTailscaleRemoteAccess: () => Promise<DesktopTailscaleRemoteAccessState>;
+  readonly issueRemotePairing: () => Promise<DesktopRemotePairingInvitation>;
+  readonly getRemotePairingState: (input: {
+    readonly id: string;
+  }) => Promise<DesktopRemotePairingState>;
+  readonly cancelRemotePairing: (input: { readonly id: string }) => Promise<boolean>;
+  readonly listRemoteDevices: () => Promise<readonly DesktopRemoteDevice[]>;
+  readonly revokeRemoteDevice: (input: { readonly id: string }) => Promise<boolean>;
   readonly reportStartupMilestone?: (milestone: RendererStartupMilestone) => Promise<void>;
   readonly pty: DesktopPtyBridge;
 };
@@ -61,29 +62,21 @@ const COMMAND_BROWSER_VIEW_CHANNEL = "desktop:command-browser-view";
 const DESTROY_BROWSER_VIEW_CHANNEL = "desktop:destroy-browser-view";
 const BROWSER_VIEW_STATE_CHANNEL = "desktop:browser-view-state";
 const BROWSER_AUTOMATION_OPEN_CHANNEL = "desktop:browser-automation-open";
-const GET_AUX_ENDPOINT_CHANNEL = "desktop:get-aux-endpoint";
-const GET_HONK_CORE_ENDPOINT_CHANNEL = "desktop:get-honk-core-endpoint";
-const GET_OPENCODE_SIDECAR_CHANNEL = "desktop:get-opencode-sidecar";
+const GET_HONK_CORE_CONNECTION_CHANNEL = "desktop:get-honk-core-connection";
+const GET_TAILSCALE_REMOTE_ACCESS_CHANNEL = "desktop:get-tailscale-remote-access";
+const ENABLE_TAILSCALE_REMOTE_ACCESS_CHANNEL = "desktop:enable-tailscale-remote-access";
+const DISABLE_TAILSCALE_REMOTE_ACCESS_CHANNEL = "desktop:disable-tailscale-remote-access";
+const ISSUE_REMOTE_PAIRING_CHANNEL = "desktop:issue-remote-pairing";
+const GET_REMOTE_PAIRING_STATE_CHANNEL = "desktop:get-remote-pairing-state";
+const CANCEL_REMOTE_PAIRING_CHANNEL = "desktop:cancel-remote-pairing";
+const LIST_REMOTE_DEVICES_CHANNEL = "desktop:list-remote-devices";
+const REVOKE_REMOTE_DEVICE_CHANNEL = "desktop:revoke-remote-device";
 const REPORT_STARTUP_MILESTONE_CHANNEL = "desktop:report-startup-milestone";
-const PERSIST_MCP_SERVER_CHANNEL = "desktop:persist-mcp-server";
-const GET_CLAUDE_AUTH_STATUS_CHANNEL = "desktop:get-claude-auth-status";
 const GET_WINDOW_CHROME_STATE_CHANNEL = "desktop:get-window-chrome-state";
 const WINDOW_CHROME_STATE_CHANNEL = "desktop:window-chrome-state";
 const SET_ACTIVE_WORK_STATE_CHANNEL = "desktop:set-active-work-state";
 const GET_CLIENT_SETTINGS_CHANNEL = "desktop:get-client-settings";
 const SET_CLIENT_SETTINGS_CHANNEL = "desktop:set-client-settings";
-const PROTECT_REMOTE_CREDENTIAL_CHANNEL = "desktop:protect-remote-credential";
-const REVEAL_REMOTE_CREDENTIAL_CHANNEL = "desktop:reveal-remote-credential";
-const GET_SERVER_EXPOSURE_STATE_CHANNEL = "desktop:get-server-exposure-state";
-const CONFIGURE_SERVER_EXPOSURE_CHANNEL = "desktop:configure-server-exposure";
-const GET_REMOTE_HOST_STATE_CHANNEL = "desktop:get-remote-host-state";
-const RESTART_REMOTE_HOST_CHANNEL = "desktop:restart-remote-host";
-const ISSUE_REMOTE_PAIRING_CHANNEL = "desktop:issue-remote-pairing";
-const GET_REMOTE_PAIRING_STATE_CHANNEL = "desktop:get-remote-pairing-state";
-const CANCEL_REMOTE_PAIRING_CHANNEL = "desktop:cancel-remote-pairing";
-const SET_REMOTE_HOST_NAME_CHANNEL = "desktop:set-remote-host-name";
-const RENAME_REMOTE_DEVICE_CHANNEL = "desktop:rename-remote-device";
-const REVOKE_REMOTE_DEVICE_CHANNEL = "desktop:revoke-remote-device";
 const LOG_RENDERER_DIAGNOSTIC_CHANNEL = "desktop:log-renderer-diagnostic";
 const PTY_OPEN_CHANNEL = "desktop:pty-open";
 const PTY_WRITE_CHANNEL = "desktop:pty-write";
@@ -93,7 +86,6 @@ const PTY_ATTACH_CHANNEL = "desktop:pty-attach";
 const PTY_LIST_CHANNEL = "desktop:pty-list";
 const PTY_DATA_CHANNEL = "desktop:pty-data";
 const PTY_EXIT_CHANNEL = "desktop:pty-exit";
-const TERMINAL_OPEN_CHANNEL = "desktop:terminal-open";
 const WINDOW_ID_ARGUMENT_PREFIX = "--honk-window-id=";
 
 function readWindowID(): string {
@@ -147,27 +139,21 @@ contextBridge.exposeInMainWorld("desktopBridge", {
       ipcRenderer.removeListener(BROWSER_AUTOMATION_OPEN_CHANNEL, wrappedListener);
     };
   },
-  onTerminalOpen: (listener) => {
-    const wrappedListener = (_event: IpcRendererEvent, input: TerminalOpenRequest) => {
-      listener(input);
-    };
-
-    ipcRenderer.on(TERMINAL_OPEN_CHANNEL, wrappedListener);
-    return () => {
-      ipcRenderer.removeListener(TERMINAL_OPEN_CHANNEL, wrappedListener);
-    };
-  },
-  getAuxEndpoint: () => ipcRenderer.invoke(GET_AUX_ENDPOINT_CHANNEL),
-  getHonkCoreEndpoint: () => ipcRenderer.invoke(GET_HONK_CORE_ENDPOINT_CHANNEL),
-  getOpencodeSidecar: () => ipcRenderer.invoke(GET_OPENCODE_SIDECAR_CHANNEL),
+  getHonkCoreConnection: () => ipcRenderer.invoke(GET_HONK_CORE_CONNECTION_CHANNEL),
+  getTailscaleRemoteAccess: () => ipcRenderer.invoke(GET_TAILSCALE_REMOTE_ACCESS_CHANNEL),
+  enableTailscaleRemoteAccess: () => ipcRenderer.invoke(ENABLE_TAILSCALE_REMOTE_ACCESS_CHANNEL),
+  disableTailscaleRemoteAccess: () => ipcRenderer.invoke(DISABLE_TAILSCALE_REMOTE_ACCESS_CHANNEL),
+  issueRemotePairing: () => ipcRenderer.invoke(ISSUE_REMOTE_PAIRING_CHANNEL),
+  getRemotePairingState: (input) => ipcRenderer.invoke(GET_REMOTE_PAIRING_STATE_CHANNEL, input),
+  cancelRemotePairing: (input) => ipcRenderer.invoke(CANCEL_REMOTE_PAIRING_CHANNEL, input),
+  listRemoteDevices: () => ipcRenderer.invoke(LIST_REMOTE_DEVICES_CHANNEL),
+  revokeRemoteDevice: (input) => ipcRenderer.invoke(REVOKE_REMOTE_DEVICE_CHANNEL, input),
   ...(process.env.HONK_DEV_STARTUP_PROBE === "1"
     ? {
         reportStartupMilestone: (milestone: RendererStartupMilestone) =>
           ipcRenderer.invoke(REPORT_STARTUP_MILESTONE_CHANNEL, milestone),
       }
     : {}),
-  persistMcpServer: (input) => ipcRenderer.invoke(PERSIST_MCP_SERVER_CHANNEL, input),
-  getClaudeAuthStatus: () => ipcRenderer.invoke(GET_CLAUDE_AUTH_STATUS_CHANNEL),
   getWindowChromeState: readWindowChromeState,
   onWindowChromeState: (listener) => {
     const wrappedListener = (_event: IpcRendererEvent, state: DesktopWindowChromeState) => {
@@ -182,22 +168,6 @@ contextBridge.exposeInMainWorld("desktopBridge", {
   setActiveWorkState: (state) => ipcRenderer.invoke(SET_ACTIVE_WORK_STATE_CHANNEL, state),
   getClientSettings: () => ipcRenderer.invoke(GET_CLIENT_SETTINGS_CHANNEL),
   setClientSettings: (settings) => ipcRenderer.invoke(SET_CLIENT_SETTINGS_CHANNEL, settings),
-  protectRemoteCredential: (credential) =>
-    ipcRenderer.invoke(PROTECT_REMOTE_CREDENTIAL_CHANNEL, credential),
-  revealRemoteCredential: (protectedCredential) =>
-    ipcRenderer.invoke(REVEAL_REMOTE_CREDENTIAL_CHANNEL, protectedCredential),
-  getServerExposureState: () => ipcRenderer.invoke(GET_SERVER_EXPOSURE_STATE_CHANNEL),
-  configureServerExposure: (input) => ipcRenderer.invoke(CONFIGURE_SERVER_EXPOSURE_CHANNEL, input),
-  getRemoteHostState: () => ipcRenderer.invoke(GET_REMOTE_HOST_STATE_CHANNEL),
-  restartRemoteHost: () => ipcRenderer.invoke(RESTART_REMOTE_HOST_CHANNEL),
-  issueRemotePairing: () => ipcRenderer.invoke(ISSUE_REMOTE_PAIRING_CHANNEL),
-  getRemotePairingState: (pairingID) =>
-    ipcRenderer.invoke(GET_REMOTE_PAIRING_STATE_CHANNEL, pairingID),
-  cancelRemotePairing: (pairingID) => ipcRenderer.invoke(CANCEL_REMOTE_PAIRING_CHANNEL, pairingID),
-  setRemoteHostName: (name) => ipcRenderer.invoke(SET_REMOTE_HOST_NAME_CHANNEL, name),
-  renameRemoteDevice: (deviceID, label) =>
-    ipcRenderer.invoke(RENAME_REMOTE_DEVICE_CHANNEL, { deviceID, label }),
-  revokeRemoteDevice: (deviceID) => ipcRenderer.invoke(REVOKE_REMOTE_DEVICE_CHANNEL, deviceID),
   pickFolder: (options) => ipcRenderer.invoke(PICK_FOLDER_CHANNEL, options),
   getHomeDirectory: () => ipcRenderer.invoke(GET_HOME_DIRECTORY_CHANNEL),
   completeOnboarding: () => ipcRenderer.invoke(COMPLETE_ONBOARDING_CHANNEL),
@@ -290,4 +260,4 @@ contextBridge.exposeInMainWorld("desktopBridge", {
       };
     },
   },
-} satisfies DesktopBridgeWithAux);
+} satisfies DesktopBridgeWithCore);

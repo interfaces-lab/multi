@@ -6,18 +6,11 @@ import type { Root } from "react-dom/client";
 // (dials.ts bind-at-import), before the full application replaces the startup shell.
 import { actions as appearanceActions } from "./appearance-store";
 import { startHonkCore } from "./chat/client";
-import { startConnection } from "./connection-store";
 import { installDesktopBridge, subscribeDesktopMenuAction } from "./desktop-bridge";
 import { installHonkDesktopExtensions } from "./desktop-extensions/runtime";
 import { router } from "./router";
-import { installRemoteServerRestore } from "./server-store";
 import { actions as settingsActions } from "./settings-store";
-import {
-  bindRouter,
-  installBrowserAutomationOpenBridge,
-  installTerminalOpenBridge,
-} from "./tab-store";
-import { installTabSummarySync } from "./tab-summary-sync";
+import { bindTabRouter } from "./tab-store";
 import { installThreadNotifications } from "./thread-notifications";
 import { installUpdatePill } from "./update-pill";
 
@@ -34,19 +27,16 @@ function installDevelopmentTools(): void {
     document.body.append(picker);
   };
 
-  if (typeof window.requestIdleCallback === "function") {
-    window.requestIdleCallback(install, { timeout: 2_000 });
+  const requestIdle = window.requestIdleCallback;
+  if (requestIdle !== undefined) {
+    requestIdle(install, { timeout: 2_000 });
   } else {
     setTimeout(install, 0);
   }
 }
 
-function startApp(root: Root): void {
-  // Bind before the full application paint so the initial pathname seeds
-  // activeKey / opens unknown thread routes without a component effect.
-  bindRouter(router);
-  installBrowserAutomationOpenBridge();
-  installTerminalOpenBridge();
+async function startApp(root: Root): Promise<void> {
+  installDesktopBridge();
   installHonkDesktopExtensions();
   subscribeDesktopMenuAction((action) => {
     if (action === "open-settings") settingsActions.open();
@@ -57,17 +47,18 @@ function startApp(root: Root): void {
 
   installUpdatePill();
   installThreadNotifications();
-  installTabSummarySync();
 
-  // React can render the connection shell while the desktop bridge waits for
-  // the sidecar endpoint. Dynamic application content remains gated as before.
-  void installDesktopBridge().then(() => {
-    installRemoteServerRestore();
-    startConnection();
-    // Honk Core connects beside opencode, not behind it: the chat surface
-    // needs no opencode authentication.
-    startHonkCore();
-  });
+  // Connecting here gives Home a core client by the time its composer paints.
+  startHonkCore();
+
+  // Before the first render, so the relaunch rule (persisted active tab beats
+  // the Home URL) resolves ahead of the router's initial paint.
+  bindTabRouter(router);
+
+  // Route-owned lazy components retain the previous page during navigation.
+  // A cold launch has no previous route, so keep StartupShell mounted until
+  // the initial route and its component are ready to commit together.
+  await router.load();
 
   root.render(
     <React.StrictMode>

@@ -1,4 +1,4 @@
-import { registerCustomTheme } from "@pierre/diffs";
+import { parsePatchFiles, registerCustomTheme, trimPatchContext } from "@pierre/diffs";
 import type { FileDiffOptions } from "@pierre/diffs";
 
 export const DIFF_THEME_NAMES = {
@@ -611,6 +611,51 @@ export function fnv1a32(
     hash = Math.imul(hash, multiplier) >>> 0;
   }
   return hash >>> 0;
+}
+
+// The transcript's edit card. A collapsed card shows about four code rows,
+// so context is trimmed to one line while collapsed and three when opened,
+// and disclosure is offered only when there is more than the preview shows.
+export const COLLAPSED_PATCH_ROWS = 4;
+export const COLLAPSED_PATCH_CONTEXT_LINES = 1;
+export const EXPANDED_PATCH_CONTEXT_LINES = 3;
+
+/**
+ * A patch prepared for rendering, or the honest fallback. Pierre owns the
+ * parse; a patch it cannot read is shown raw under a plain reason rather
+ * than dropped, because a silent empty card would hide a real edit.
+ */
+export type RenderablePatch =
+  | { readonly kind: "patch"; readonly text: string; readonly rows: number }
+  | { readonly kind: "raw"; readonly text: string; readonly reason: string };
+
+export function renderablePatch(patch: string, contextLines: number): RenderablePatch | null {
+  const source = patch.trim();
+  if (source.length === 0) return null;
+  try {
+    const prepared = trimPatchContext(source, contextLines);
+    const files = parsePatchFiles(prepared, buildPatchCacheKey(prepared), true).flatMap(
+      (parsed) => parsed.files,
+    );
+    const rows = files.reduce(
+      (total, file) => total + file.hunks.reduce((sum, hunk) => sum + hunk.unifiedLineCount, 0),
+      0,
+    );
+    return files.length > 0
+      ? { kind: "patch", text: prepared, rows }
+      : { kind: "raw", text: source, reason: "Unsupported diff format. Showing raw patch." };
+  } catch {
+    return { kind: "raw", text: source, reason: "Failed to parse diff. Showing raw patch." };
+  }
+}
+
+/** Whether an edit has more to show than its collapsed preview already does. */
+export function patchExceedsPreview(patch: string): boolean {
+  const renderable = renderablePatch(patch, EXPANDED_PATCH_CONTEXT_LINES);
+  if (renderable === null) return false;
+  return renderable.kind === "raw"
+    ? renderable.text.split("\n").length > COLLAPSED_PATCH_ROWS
+    : renderable.rows > COLLAPSED_PATCH_ROWS;
 }
 
 export function buildPatchCacheKey(patch: string, scope = "diff-rendering"): string {

@@ -18,12 +18,14 @@
 
 import type {
   Api,
+  AuthEvent,
+  AuthPrompt,
   Credential,
   CredentialStore,
   Model,
   MutableModels,
 } from "@earendil-works/pi-ai";
-import { Context, Effect, Layer, Schema } from "effect";
+import { Context, Effect, Layer, Queue, Schema, Stream } from "effect";
 import { Rpc, RpcGroup } from "effect/unstable/rpc";
 
 import type { ServiceOf } from "./util/rpc";
@@ -94,6 +96,66 @@ export const ListOutput = Schema.Struct({
 export type ListOutput = typeof ListOutput.Type;
 
 /**
+ * One choice in a `select` login prompt, as Pi's flow offers it.
+ *
+ * @category schemas
+ */
+export const LoginPromptOption = Schema.Struct({
+  id: Schema.NonEmptyString,
+  label: Schema.String,
+  description: Schema.optionalKey(Schema.String),
+}).annotate({ identifier: "ModelsLoginPromptOption" });
+export type LoginPromptOption = typeof LoginPromptOption.Type;
+
+/**
+ * One frame of the {@link Login} stream: Pi's interactive login flow relayed
+ * as typed messages, carried faithfully rather than reinterpreted.
+ *
+ * `open_url`, `device_code`, `info`, and `progress` mirror Pi's notify
+ * events one for one. `prompt` asks the user for a string — pasted code,
+ * secret, or a `select` option id — answered through {@link AnswerLogin} with
+ * the frame's `promptId`. Anthropic's flow exercises `open_url`, one
+ * `manual_code` prompt raced against its localhost callback, and `progress`.
+ * `done` is always the final frame of a successful login; a prompt still
+ * pending when the stream ends is void, so a client dismisses its prompt UI
+ * on stream end rather than waiting for a cancellation frame.
+ *
+ * @category schemas
+ */
+export const LoginEvent = Schema.Union([
+  Schema.Struct({
+    kind: Schema.Literal("open_url"),
+    url: Schema.String,
+    instructions: Schema.optionalKey(Schema.String),
+  }),
+  Schema.Struct({
+    kind: Schema.Literal("device_code"),
+    userCode: Schema.String,
+    verificationUri: Schema.String,
+    intervalSeconds: Schema.optionalKey(Schema.Finite),
+    expiresInSeconds: Schema.optionalKey(Schema.Finite),
+  }),
+  Schema.Struct({
+    kind: Schema.Literal("info"),
+    message: Schema.String,
+    links: Schema.optionalKey(
+      Schema.Array(Schema.Struct({ url: Schema.String, label: Schema.optionalKey(Schema.String) })),
+    ),
+  }),
+  Schema.Struct({ kind: Schema.Literal("progress"), message: Schema.String }),
+  Schema.Struct({
+    kind: Schema.Literal("prompt"),
+    promptId: Schema.NonEmptyString,
+    promptType: Schema.Literals(["text", "secret", "select", "manual_code"]),
+    message: Schema.String,
+    placeholder: Schema.optionalKey(Schema.String),
+    options: Schema.optionalKey(Schema.Array(LoginPromptOption)),
+  }),
+  Schema.Struct({ kind: Schema.Literal("done") }),
+]).annotate({ identifier: "ModelsLoginEvent" });
+export type LoginEvent = typeof LoginEvent.Type;
+
+/**
  * No provider in the collection carries this id.
  *
  * @category errors
@@ -127,6 +189,25 @@ export class UnknownModelError extends Schema.TaggedErrorClass<UnknownModelError
 ) {}
 
 /**
+ * The provider and model exist, but the provider has no usable credential.
+ *
+ * Resolving this before session creation keeps an unrunnable explicit choice
+ * from creating a transcript whose first request can only fail. Provider ids
+ * remain exact: `openai` API-key auth and `openai-codex` OAuth are different
+ * Pi providers, so core never borrows one provider's credential for another.
+ *
+ * @category errors
+ */
+export class ProviderNotConfiguredError extends Schema.TaggedErrorClass<ProviderNotConfiguredError>()(
+  "ModelsProviderNotConfiguredError",
+  {
+    code: Schema.tag("models.provider_not_configured"),
+    message: Schema.tag("This provider is not configured."),
+    providerId: Schema.NonEmptyString,
+  },
+) {}
+
+/**
  * No configured provider offers any model.
  *
  * The answer to "give me a default" on a host where nothing is unlocked yet.
@@ -156,6 +237,40 @@ export class CredentialError extends Schema.TaggedErrorClass<CredentialError>()(
 ) {}
 
 /**
+ * The provider-owned login flow did not produce a credential.
+ *
+ * Covers refusal, network failure, and cancellation alike: Pi's flow rejects
+ * with one Error either way, preserved here as the cause. The stored
+ * credential, if any, is untouched — a failed login never logs anyone out.
+ *
+ * @category errors
+ */
+export class LoginError extends Schema.TaggedErrorClass<LoginError>()("ModelsLoginError", {
+  code: Schema.tag("models.login_failed"),
+  message: Schema.tag("Honk could not complete this login."),
+  providerId: Schema.NonEmptyString,
+  cause: Schema.optionalKey(Schema.Defect()),
+}) {}
+
+/**
+ * No login flow is waiting on this prompt.
+ *
+ * The honest answer for an answer that raced the flow: the localhost callback
+ * won, the login ended, or the id was never minted. A client treats it as
+ * "this prompt is over", not as a failure of the login itself.
+ *
+ * @category errors
+ */
+export class UnknownLoginPromptError extends Schema.TaggedErrorClass<UnknownLoginPromptError>()(
+  "ModelsUnknownLoginPromptError",
+  {
+    code: Schema.tag("models.unknown_login_prompt"),
+    message: Schema.tag("This login prompt is no longer pending."),
+    promptId: Schema.NonEmptyString,
+  },
+) {}
+
+/**
  * Every way resolving a model reference can fail.
  *
  * Session commands carry this union: any command may be the first touch of a
@@ -163,15 +278,24 @@ export class CredentialError extends Schema.TaggedErrorClass<CredentialError>()(
  *
  * @category errors
  */
-export const ResolveError = Schema.Union([UnknownProviderError, UnknownModelError, NoModelError]);
+export const ResolveError = Schema.Union([UnknownProviderError, UnknownModelError]);
 export type ResolveError = typeof ResolveError.Type;
+
+/** Every way choosing a currently runnable model can fail. */
+export const AvailableError = Schema.Union([
+  UnknownProviderError,
+  UnknownModelError,
+  ProviderNotConfiguredError,
+  NoModelError,
+]);
+export type AvailableError = typeof AvailableError.Type;
 
 /**
  * Every expected failure this domain owns.
  *
  * @category errors
  */
-export type Error = ResolveError | CredentialError;
+export type Error = AvailableError | CredentialError | LoginError | UnknownLoginPromptError;
 
 /**
  * The catalog with auth status, for settings.
@@ -186,9 +310,8 @@ export const List = Rpc.make("models.list", {
 /**
  * Stores an API key for a provider.
  *
- * The only credential write in version zero. OAuth flows are interactive and
- * provider-owned (Pi's `Models.login` drives them with prompts), so they enter
- * through a host surface, not a wire command.
+ * The direct credential write. Interactive, provider-owned flows enter
+ * through {@link Login} instead.
  *
  * @category commands
  */
@@ -200,6 +323,9 @@ export const SetCredential = Rpc.make("models.set_credential", {
 /**
  * Removes the stored credential for a provider (logout).
  *
+ * Covers OAuth and API keys alike: disconnecting a Claude subscription is
+ * this command on `anthropic`.
+ *
  * @category commands
  */
 export const DeleteCredential = Rpc.make("models.delete_credential", {
@@ -208,11 +334,45 @@ export const DeleteCredential = Rpc.make("models.delete_credential", {
 });
 
 /**
- * The models command catalog, declared once.
+ * Runs a provider's interactive OAuth login, relaying its prompts.
+ *
+ * The stream drives Pi's `Models.login`: each frame is a {@link LoginEvent},
+ * `prompt` frames are answered through {@link AnswerLogin}, and Pi persists
+ * the credential itself before the closing `done` frame — after which
+ * {@link List} reports the provider configured with `authType: "oauth"`.
+ * Ending the stream early aborts the flow and stores nothing. Settings owns
+ * every visual; the core owns nothing but the relay.
+ *
+ * @category commands
+ */
+export const Login = Rpc.make("models.login", {
+  payload: { providerId: Schema.NonEmptyString },
+  success: LoginEvent,
+  error: Schema.Union([UnknownProviderError, LoginError]),
+  stream: true,
+});
+
+/**
+ * Answers one pending {@link Login} prompt with the user's input.
+ *
+ * `value` is the entered or pasted string; for a `select` prompt it is the
+ * chosen option's id.
+ *
+ * @category commands
+ */
+export const AnswerLogin = Rpc.make("models.answer_login", {
+  payload: { promptId: Schema.NonEmptyString, value: Schema.String },
+  error: UnknownLoginPromptError,
+});
+
+/**
+ * The request/response command catalog, declared once.
  *
  * Everything else derives from this record: the {@link Rpcs} group, the
  * wire-facing half of {@link Interface}, and the client namespace in
- * `honk-core`.
+ * `honk-core`. {@link Login} stays outside it because a stream command is not
+ * a request/response method; it is added to the group and the interface by
+ * hand, the same shape the session domain uses.
  *
  * @category commands
  */
@@ -220,21 +380,23 @@ export const commands = {
   list: List,
   setCredential: SetCredential,
   deleteCredential: DeleteCredential,
+  answerLogin: AnswerLogin,
 };
 
 /**
- * The models command group, derived from {@link commands}.
+ * The models command group, derived from {@link commands} plus the
+ * {@link Login} stream.
  *
  * @category commands
  */
-export class Rpcs extends RpcGroup.make(...Object.values(commands)) {}
+export class Rpcs extends RpcGroup.make(...Object.values(commands), Login) {}
 
 /**
  * The service the session layer and the RPC handlers share.
  *
  * The wire-facing methods derive from {@link commands}, so the service cannot
- * drift from the wire contract. `collection` and `resolve` are service-only
- * additions with no RPC behind them.
+ * drift from the wire contract. `collection`, `resolve`, and
+ * `resolveAvailable` are service-only additions with no RPC behind them.
  *
  * @category service
  */
@@ -251,14 +413,33 @@ export interface Interface extends ServiceOf<typeof commands> {
   /**
    * Resolves a model reference to the Pi `Model` a harness runs on.
    *
-   * Without a reference, the default is the first model of the first
-   * configured provider — deliberate policy-free minimalism, because model
-   * presentation belongs to the frontend (spec section 11). A client that
-   * cares which model runs passes the reference explicitly.
+   * Historical resolution is exact and credential-independent: a provider
+   * logout does not make its existing transcript unreadable.
    */
-  readonly resolve: (
+  readonly resolve: (ref: ModelRef) => Effect.Effect<Model<Api>, ResolveError>;
+
+  /**
+   * Resolves a model that can run with the provider's current credential.
+   *
+   * Creation, model changes, and delegation use this boundary. Restoration
+   * deliberately uses {@link resolve}: a disconnected provider must not make
+   * an existing transcript unreadable.
+   */
+  readonly resolveAvailable: (
     ref?: ModelRef,
-  ) => Effect.Effect<Model<Api>, UnknownProviderError | UnknownModelError | NoModelError>;
+  ) => Effect.Effect<
+    Model<Api>,
+    UnknownProviderError | UnknownModelError | ProviderNotConfiguredError | NoModelError
+  >;
+
+  /**
+   * The {@link Login} relay as in-process callers consume it: one stream per
+   * login attempt. Declared by hand because a stream command is not a
+   * request/response method.
+   */
+  readonly login: (input: {
+    readonly providerId: string;
+  }) => Stream.Stream<LoginEvent, UnknownProviderError | LoginError>;
 }
 
 /**
@@ -287,13 +468,7 @@ const make = (options: LayerOptions): Effect.Effect<Interface> =>
   Effect.sync(() => {
     const { collection, credentials } = options;
 
-    const resolve = Effect.fnUntraced(function* (ref?: ModelRef) {
-      if (ref === undefined) {
-        const available = yield* Effect.promise(() => collection.getAvailable());
-        const first = available[0];
-        if (first === undefined) return yield* new NoModelError({});
-        return first;
-      }
+    const resolve = Effect.fnUntraced(function* (ref: ModelRef) {
       if (collection.getProvider(ref.providerId) === undefined) {
         return yield* new UnknownProviderError({ providerId: ref.providerId });
       }
@@ -302,6 +477,18 @@ const make = (options: LayerOptions): Effect.Effect<Interface> =>
         return yield* new UnknownModelError({ providerId: ref.providerId, modelId: ref.modelId });
       }
       return model;
+    });
+
+    const resolveAvailable = Effect.fnUntraced(function* (ref?: ModelRef) {
+      const available = yield* Effect.promise(() => collection.getAvailable(ref?.providerId));
+      if (ref === undefined) {
+        const first = available[0];
+        if (first === undefined) return yield* new NoModelError({});
+        return first;
+      }
+      const model = yield* resolve(ref);
+      if (available.some((candidate) => candidate.id === ref.modelId)) return model;
+      return yield* new ProviderNotConfiguredError({ providerId: ref.providerId });
     });
 
     const list = Effect.fnUntraced(function* (_input: Rpc.Payload<typeof List>) {
@@ -315,6 +502,12 @@ const make = (options: LayerOptions): Effect.Effect<Interface> =>
         const methods: ("api_key" | "oauth")[] = [];
         if (provider.auth.apiKey?.login !== undefined) methods.push("api_key");
         if (provider.auth.oauth !== undefined) methods.push("oauth");
+        // Configured rows are the exact credential-filtered set creation can
+        // run. Unconfigured rows retain the full catalog for setup UI.
+        const models =
+          check === undefined
+            ? provider.getModels()
+            : yield* Effect.promise(() => collection.getAvailable(provider.id));
         providers.push({
           id: provider.id,
           name: provider.name,
@@ -322,7 +515,7 @@ const make = (options: LayerOptions): Effect.Effect<Interface> =>
           methods,
           ...(check?.type !== undefined ? { authType: check.type } : {}),
           ...(check?.source !== undefined ? { source: check.source } : {}),
-          models: provider.getModels().map((model) => ({ id: model.id, name: model.name })),
+          models: models.map((model) => ({ id: model.id, name: model.name })),
         });
       }
       return { providers } satisfies ListOutput;
@@ -348,9 +541,7 @@ const make = (options: LayerOptions): Effect.Effect<Interface> =>
       });
     });
 
-    const deleteCredential = Effect.fnUntraced(function* (input: {
-      readonly providerId: string;
-    }) {
+    const deleteCredential = Effect.fnUntraced(function* (input: { readonly providerId: string }) {
       if (collection.getProvider(input.providerId) === undefined) {
         return yield* new UnknownProviderError({ providerId: input.providerId });
       }
@@ -360,8 +551,169 @@ const make = (options: LayerOptions): Effect.Effect<Interface> =>
       });
     });
 
-    return { collection, resolve, list, setCredential, deleteCredential } satisfies Interface;
+    // Prompts pending an answer, across every live login attempt. Ids are
+    // unguessable and minted per prompt, so one flat map serves all attempts
+    // and an answer can never land on another flow's prompt by accident; the
+    // attempt tag lets a finalizer sweep only its own flow's entries.
+    // `globalThis.Error` because this module's own `Error` union shadows the
+    // global type name here.
+    const pendingPrompts = new Map<
+      string,
+      {
+        readonly attempt: symbol;
+        readonly resolve: (value: string) => void;
+        readonly reject: (cause: globalThis.Error) => void;
+      }
+    >();
+
+    const login = (input: { readonly providerId: string }) =>
+      Stream.callback<LoginEvent, UnknownProviderError | LoginError>((queue) =>
+        Effect.gen(function* () {
+          // Failures travel through the queue: the callback effect runs on a
+          // forked fiber, so failing the effect itself would never reach the
+          // subscriber.
+          if (collection.getProvider(input.providerId) === undefined) {
+            yield* Queue.fail(queue, new UnknownProviderError({ providerId: input.providerId }));
+            return;
+          }
+
+          const attempt = Symbol("models.login");
+
+          const notify = (event: AuthEvent) => {
+            Queue.offerUnsafe(queue, toLoginEvent(event));
+          };
+
+          const prompt = (request: AuthPrompt) =>
+            new Promise<string>((resolve, reject) => {
+              // A prompt can arrive already cancelled: Pi races prompts
+              // against out-of-band completion, e.g. a localhost callback.
+              if (request.signal?.aborted === true) {
+                reject(new Error("The login flow cancelled this prompt."));
+                return;
+              }
+              const promptId = crypto.randomUUID();
+              pendingPrompts.set(promptId, { attempt, resolve, reject });
+              request.signal?.addEventListener(
+                "abort",
+                () => {
+                  pendingPrompts.delete(promptId);
+                  reject(new Error("The login flow cancelled this prompt."));
+                },
+                { once: true },
+              );
+              Queue.offerUnsafe(queue, toPromptEvent(promptId, request));
+            });
+
+          yield* Effect.addFinalizer(() =>
+            Effect.sync(() => {
+              for (const [promptId, pending] of pendingPrompts) {
+                if (pending.attempt !== attempt) continue;
+                pendingPrompts.delete(promptId);
+                pending.reject(new Error("The login flow ended."));
+              }
+            }),
+          );
+
+          // Pi owns the flow and persists the credential before this promise
+          // resolves, so `done` is only ever emitted over a stored credential.
+          // The fork is scoped to the stream: a detaching subscriber closes
+          // the scope, interruption aborts the signal, and Pi's flow honors
+          // the signal by tearing down its callback server.
+          yield* Effect.tryPromise({
+            try: (signal) =>
+              collection.login(input.providerId, "oauth", { signal, notify, prompt }),
+            catch: (cause) => new LoginError({ providerId: input.providerId, cause }),
+          }).pipe(
+            Effect.matchCauseEffect({
+              onSuccess: () =>
+                Queue.offer(queue, { kind: "done" }).pipe(Effect.andThen(Queue.end(queue))),
+              onFailure: (cause) => Queue.failCause(queue, cause),
+            }),
+            Effect.forkScoped,
+          );
+        }),
+      );
+
+    const answerLogin = Effect.fnUntraced(function* (input: {
+      readonly promptId: string;
+      readonly value: string;
+    }) {
+      const pending = pendingPrompts.get(input.promptId);
+      if (pending === undefined) {
+        return yield* new UnknownLoginPromptError({ promptId: input.promptId });
+      }
+      pendingPrompts.delete(input.promptId);
+      pending.resolve(input.value);
+    });
+
+    return {
+      collection,
+      resolve,
+      resolveAvailable,
+      list,
+      setCredential,
+      deleteCredential,
+      login,
+      answerLogin,
+    } satisfies Interface;
   });
+
+/** One Pi notify event as the {@link Login} stream carries it. */
+const toLoginEvent = (event: AuthEvent): LoginEvent => {
+  switch (event.type) {
+    case "auth_url":
+      return {
+        kind: "open_url",
+        url: event.url,
+        ...(event.instructions === undefined ? {} : { instructions: event.instructions }),
+      };
+    case "device_code":
+      return {
+        kind: "device_code",
+        userCode: event.userCode,
+        verificationUri: event.verificationUri,
+        ...(event.intervalSeconds === undefined ? {} : { intervalSeconds: event.intervalSeconds }),
+        ...(event.expiresInSeconds === undefined
+          ? {}
+          : { expiresInSeconds: event.expiresInSeconds }),
+      };
+    case "info":
+      return {
+        kind: "info",
+        message: event.message,
+        ...(event.links === undefined
+          ? {}
+          : {
+              links: event.links.map((link) => ({
+                url: link.url,
+                ...(link.label === undefined ? {} : { label: link.label }),
+              })),
+            }),
+      };
+    case "progress":
+      return { kind: "progress", message: event.message };
+  }
+};
+
+/** One Pi prompt as the {@link Login} stream carries it. */
+const toPromptEvent = (promptId: string, prompt: AuthPrompt): LoginEvent => ({
+  kind: "prompt",
+  promptId,
+  promptType: prompt.type,
+  message: prompt.message,
+  ...(prompt.type !== "select" && prompt.placeholder !== undefined
+    ? { placeholder: prompt.placeholder }
+    : {}),
+  ...(prompt.type === "select"
+    ? {
+        options: prompt.options.map((option) => ({
+          id: option.id,
+          label: option.label,
+          ...(option.description === undefined ? {} : { description: option.description }),
+        })),
+      }
+    : {}),
+});
 
 /**
  * The service key and its construction, declared together.
@@ -392,6 +744,8 @@ export const rpcLayer = Rpcs.toLayer(
       "models.list": (payload) => models.list(payload),
       "models.set_credential": (payload) => models.setCredential(payload),
       "models.delete_credential": (payload) => models.deleteCredential(payload),
+      "models.login": (payload) => models.login(payload),
+      "models.answer_login": (payload) => models.answerLogin(payload),
     };
   }),
 );

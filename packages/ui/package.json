@@ -59,6 +59,7 @@
     "dev": "vite dev",
     "sync:tokens": "node scripts/sync-platform-tokens.mjs",
     "check:tokens": "node scripts/sync-platform-tokens.mjs --check",
+    "test": "vitest run --config vitest.config.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
@@ -79,14 +80,15 @@
     "dialkit": "^1.3.0",
     "expo-image": "~57.0.0",
     "motion": "^12.42.2",
-    "react": "^19.2.7",
-    "react-dom": "^19.2.7",
-    "react-native": "0.86.0",
+    "react": "19.2.3",
+    "react-dom": "19.2.3",
+    "react-native": "0.86.2",
     "react-native-reanimated": "4.5.0",
     "react-native-worklets": "0.10.0",
     "tailwindcss": "^4.3.2",
     "typescript": "catalog:",
-    "vite": "^8.1.4"
+    "vite": "^8.1.4",
+    "vitest": "catalog:"
   },
   "peerDependencies": {
     "expo-image": ">=57.0.0",

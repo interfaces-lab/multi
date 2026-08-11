@@ -1,4 +1,5 @@
-import type { OpenCodeServerKey, OpenCodeVcsFileStatus } from "@honk/opencode";
+import type { Git } from "@honk/core";
+import type { Workspace } from "@honk/core/workspace";
 import { basename, normalizePathSeparators } from "@honk/shared/paths";
 import { Checkbox, Icon, IconButton, Spinner, Text } from "@honk/ui";
 import {
@@ -237,7 +238,7 @@ const styles = stylex.create({
   },
 });
 
-function fileStatusGlyph(status: OpenCodeVcsFileStatus["status"]): "A" | "D" | "M" {
+function fileStatusGlyph(status: Git.ChangeStatus): "A" | "D" | "M" {
   switch (status) {
     case "added":
       return "A";
@@ -248,7 +249,7 @@ function fileStatusGlyph(status: OpenCodeVcsFileStatus["status"]): "A" | "D" | "
   }
 }
 
-function placeholderMessage(status: OpenCodeVcsFileStatus["status"]): {
+function placeholderMessage(status: Git.ChangeStatus): {
   readonly title: string;
   readonly detail: string;
 } {
@@ -274,8 +275,7 @@ function splitPath(file: string): { readonly dir: string; readonly name: string 
 
 function WorkbenchChangesCard({
   file,
-  server,
-  directory,
+  workspaceId,
   patch,
   patchPending,
   diffStyle,
@@ -292,9 +292,8 @@ function WorkbenchChangesCard({
   onRevert,
   actionsDisabled,
 }: {
-  readonly file: OpenCodeVcsFileStatus;
-  readonly server: OpenCodeServerKey;
-  readonly directory: string;
+  readonly file: Git.FileChange;
+  readonly workspaceId: Workspace.WorkspaceId;
   readonly patch: string | undefined;
   // While the diff stream is still resolving, an absent patch means "loading", not "no diff".
   readonly patchPending: boolean;
@@ -442,7 +441,7 @@ function WorkbenchChangesCard({
               <Spinner size="sm" tone="muted" />
             </div>
           ) : file.status !== "deleted" && isImagePreviewPath(file.file) ? (
-            <WorkbenchChangesImage server={server} directory={directory} path={file.file} />
+            <WorkbenchChangesImage workspaceId={workspaceId} path={file.file} />
           ) : (
             <div {...stylex.props(styles.placeholder)}>
               <Text as="p" size="sm" tone="muted" weight="regular">

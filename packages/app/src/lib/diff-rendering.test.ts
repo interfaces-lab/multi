@@ -12,13 +12,14 @@ describe("buildDiffOptions", () => {
   });
 
   it("leaves the gutter single-column when no patch is supplied", () => {
-    expect(buildDiffOptions("light", "unified").onPostRender).toBeUndefined();
+    expect(buildDiffOptions("light", "unified")).not.toHaveProperty("onPostRender");
   });
 
   it("attaches the dual-number gutter hook when a patch is supplied", () => {
-    expect(
-      buildDiffOptions("light", "unified", false, "@@ -1 +1 @@\n-a\n+b\n").onPostRender,
-    ).toBeTypeOf("function");
+    expect(buildDiffOptions("light", "unified", false, "@@ -1 +1 @@\n-a\n+b\n")).toHaveProperty(
+      "onPostRender",
+      expect.any(Function),
+    );
   });
 
   // Vitest runs this package without a DOM, so the gutter cells are stubbed down
@@ -33,14 +34,14 @@ describe("buildDiffOptions", () => {
     ];
     const node = { querySelectorAll: () => cells } as unknown as HTMLElement;
     const instance = {} as never;
-    const onPostRender = buildDiffOptions(
+    const options = buildDiffOptions(
       "dark",
       "unified",
       false,
       ["@@ -10,4 +10,5 @@", " alpha", "-beta", "+gamma", "+delta", " epsilon", ""].join("\n"),
-    ).onPostRender;
+    );
 
-    onPostRender?.(node, instance, "mount");
+    options.onPostRender?.(node, instance, "mount");
     expect(cells.map((cell) => cell.attributes["data-alt-number"])).toEqual([
       "10",
       "",
@@ -49,7 +50,7 @@ describe("buildDiffOptions", () => {
       "12",
     ]);
 
-    onPostRender?.(node, instance, "update");
+    options.onPostRender?.(node, instance, "update");
     expect(cells.map((cell) => cell.attributes["data-alt-number"])).toEqual([
       "10",
       "",

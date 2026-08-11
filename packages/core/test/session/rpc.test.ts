@@ -66,7 +66,7 @@ describe("session rpc handlers", () => {
 });
 
 describe("session wire contract: create, prompt, reload, live events", () => {
-  it.effect("reload over the wire returns the committed transcript and run status", () =>
+  it.effect("reload over the wire returns the committed transcript and run phase", () =>
     Effect.gen(function* () {
       const { faux, appLayer } = makeFauxSessionLayer();
       faux.setResponses([fauxAssistantMessage("Hello over the wire")]);
@@ -80,7 +80,7 @@ describe("session wire contract: create, prompt, reload, live events", () => {
         yield* client["session.prompt"]({ sessionId: id, text: "Say hello" });
 
         const state = yield* client["session.reload"]({ sessionId: id });
-        expect(state.status).toBe("idle");
+        expect(state.phase).toBe("idle");
         const messages = messageEntries(state.entries);
         expect(messages.map((entry) => entry.message.role)).toEqual(["user", "assistant"]);
         expect(textOf(messages[0])).toBe("Say hello");
@@ -135,14 +135,14 @@ describe("session wire contract: create, prompt, reload, live events", () => {
 
         // Reload mid-run: authoritative read while events keep flowing.
         const during = yield* client["session.reload"]({ sessionId: id });
-        expect(during.status).toBe("running");
+        expect(during.phase).toBe("turn");
 
         release();
         yield* Fiber.join(run);
         yield* Deferred.await(sawSettled);
 
         const after = yield* client["session.reload"]({ sessionId: id });
-        expect(after.status).toBe("idle");
+        expect(after.phase).toBe("idle");
 
         expect(seen[0]).toBe("live");
         expect(seen).toContain("agent_start");

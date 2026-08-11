@@ -1,60 +1,26 @@
-import {
-  IconChanges,
-  IconConsoleSimple,
-  IconFileBend,
-  IconGlobe,
-  IconPlanning,
-  IconProgress25,
-  IconProgress50,
-  IconProgress75,
-  IconProgress100,
-  IconTasks,
-} from "@honk/ui/icons";
+import { IconChanges, IconConsoleSimple, IconFileBend, IconGlobe } from "@honk/ui/icons";
+import type { Glyph } from "@honk/ui";
+import { Schema } from "effect";
 
-import type { ToolTodo } from "./tool-part-projection";
+type WorkbenchToolKind = "changes" | "browser" | "terminal" | "files";
 
-const WORKBENCH_TOOL_TABS = [
+interface WorkbenchToolTabEntry {
+  readonly id: WorkbenchToolKind;
+  readonly label: string;
+  readonly icon: Glyph;
+}
+
+const WorkbenchToolKindSchema = Schema.Literals(["changes", "browser", "terminal", "files"]);
+
+// The workbench's fixed tool set. Order is presentation order in the rail and
+// the "+" menu. Plan/Tasks belonged to the retired backend and have no Honk Core
+// equivalent and are gone rather than shipped dead.
+const WORKBENCH_TOOL_TABS: readonly WorkbenchToolTabEntry[] = [
   { id: "changes", label: "Changes", icon: IconChanges },
-  { id: "tasks", label: "Tasks", icon: IconTasks },
   { id: "browser", label: "Browser", icon: IconGlobe },
   { id: "terminal", label: "Terminal", icon: IconConsoleSimple },
   { id: "files", label: "Files", icon: IconFileBend },
-] as const;
+] satisfies readonly WorkbenchToolTabEntry[];
 
-function workbenchToolTabs(hasPlan: boolean, tasks: readonly ToolTodo[] = []) {
-  return WORKBENCH_TOOL_TABS.map((entry) => {
-    if (entry.id !== "tasks") return entry;
-    if (hasPlan) return { ...entry, label: "Plan", icon: IconPlanning };
-    return { ...entry, icon: taskProgressIcon(tasks) };
-  });
-}
-
-function visibleWorkbenchToolTabs({
-  hasPlan,
-  hasTasksPanel,
-  tasks,
-}: {
-  readonly hasPlan: boolean;
-  readonly hasTasksPanel: boolean;
-  readonly tasks: readonly ToolTodo[];
-}) {
-  const tabs = workbenchToolTabs(hasPlan, tasks);
-  return hasPlan || tasks.length > 0 || hasTasksPanel
-    ? tabs
-    : tabs.filter((entry) => entry.id !== "tasks");
-}
-
-function taskProgressIcon(tasks: readonly ToolTodo[]) {
-  const completed = tasks.filter((task) => task.status === "completed").length;
-  if (completed === 0 || tasks.length === 0) return IconTasks;
-  const progress = completed / tasks.length;
-  if (progress <= 0.25) return IconProgress25;
-  if (progress <= 0.5) return IconProgress50;
-  if (progress <= 0.75) return IconProgress75;
-  return IconProgress100;
-}
-
-type WorkbenchToolTabEntry = ReturnType<typeof workbenchToolTabs>[number];
-
-export { WORKBENCH_TOOL_TABS, visibleWorkbenchToolTabs, workbenchToolTabs };
-export type { WorkbenchToolTabEntry };
+export { WORKBENCH_TOOL_TABS, WorkbenchToolKindSchema };
+export type { WorkbenchToolKind, WorkbenchToolTabEntry };

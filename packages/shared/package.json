@@ -36,14 +36,6 @@
       "types": "./src/server-config.ts",
       "import": "./src/server-config.ts"
     },
-    "./managed-remote-access": {
-      "types": "./src/managed-remote-access.ts",
-      "import": "./src/managed-remote-access.ts"
-    },
-    "./managed-relay": {
-      "types": "./src/managed-relay.ts",
-      "import": "./src/managed-relay.ts"
-    },
     "./interaction-mode": {
       "types": "./src/interaction-mode.ts",
       "import": "./src/interaction-mode.ts"
@@ -119,10 +111,6 @@
     "./schema-json": {
       "types": "./src/schema-json.ts",
       "import": "./src/schema-json.ts"
-    },
-    "./Struct": {
-      "types": "./src/Struct.ts",
-      "import": "./src/Struct.ts"
     },
     "./server-settings": {
       "types": "./src/server-settings.ts",

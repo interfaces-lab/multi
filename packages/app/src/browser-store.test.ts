@@ -1,18 +1,15 @@
-import { createOpenCodeServer, openCodeSessionRef } from "@honk/opencode";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   applyBrowserViewState,
   browserResourceID,
   browserResourceFor,
+  removeBrowserOwners,
+  removeBrowserOwnersWhere,
   removeBrowserResource,
-  removeBrowserServer,
-  removeBrowserSessions,
   requestBrowserOpen,
   resetBrowserStoreForTests,
 } from "./browser-store";
-
-const server = createOpenCodeServer({ origin: "http://127.0.0.1:4096" });
 
 afterEach(() => {
   resetBrowserStoreForTests();
@@ -37,8 +34,8 @@ function stubDesktopBrowserBridge(
 
 describe("browser resources", () => {
   it("stores a separate URL for each session", () => {
-    const first = openCodeSessionRef(server.key, "ses_browser_one");
-    const second = openCodeSessionRef(server.key, "ses_browser_two");
+    const first = "ses_browser_one";
+    const second = "ses_browser_two";
 
     requestBrowserOpen(first, "https://example.test/one");
     expect(browserResourceFor(first).getSnapshot()).toMatchObject({
@@ -61,7 +58,7 @@ describe("browser resources", () => {
   });
 
   it("applies native view navigation and media state", () => {
-    const ref = openCodeSessionRef(server.key, "ses_native_browser");
+    const ref = "ses_native_browser";
     const resource = browserResourceFor(ref);
 
     applyBrowserViewState({
@@ -83,7 +80,7 @@ describe("browser resources", () => {
   });
 
   it("keeps same-session browser tabs isolated by resource ID", () => {
-    const ref = openCodeSessionRef(server.key, "ses_parallel_browsers");
+    const ref = "ses_parallel_browsers";
     const first = browserResourceFor(ref, "browser_one");
     const second = browserResourceFor(ref, "browser_two");
 
@@ -112,24 +109,24 @@ describe("browser resources", () => {
   });
 
   it("clears renderer state and destroys the native view when its session closes", () => {
-    const ref = openCodeSessionRef(server.key, "ses_unmounted_browser");
+    const ref = "ses_unmounted_browser";
     const destroyBrowserView = stubDesktopBrowserBridge();
     requestBrowserOpen(ref, "https://example.test/unmounted");
 
-    removeBrowserSessions(server.key, [ref.sessionID]);
+    removeBrowserOwners([ref]);
 
     expect(destroyBrowserView).toHaveBeenCalledWith({ browserId: browserResourceID(ref) });
     expect(browserResourceFor(ref).getSnapshot().committedUrl).toBe("");
   });
 
   it("keeps dynamic workspace browsers when their owner session tab closes", () => {
-    const ref = openCodeSessionRef(server.key, "ses_persistent_browser");
+    const ref = "ses_persistent_browser";
     const destroyBrowserView = stubDesktopBrowserBridge();
     requestBrowserOpen(ref, "https://example.test/default");
     const dynamic = browserResourceFor(ref, "browser_persistent");
     dynamic.requestNavigation("https://example.test/persistent");
 
-    removeBrowserSessions(server.key, [ref.sessionID]);
+    removeBrowserOwners([ref]);
 
     expect(destroyBrowserView).toHaveBeenCalledTimes(1);
     expect(destroyBrowserView).toHaveBeenCalledWith({ browserId: browserResourceID(ref) });
@@ -141,13 +138,13 @@ describe("browser resources", () => {
     });
   });
 
-  it("destroys every browser resource when its server closes", () => {
-    const ref = openCodeSessionRef(server.key, "ses_server_cleanup");
+  it("destroys every matching browser resource, automation- and user-owned alike", () => {
+    const ref = "ses_server_cleanup";
     const destroyBrowserView = stubDesktopBrowserBridge();
     browserResourceFor(ref);
     browserResourceFor(ref, "browser_server_cleanup");
 
-    removeBrowserServer(server.key);
+    removeBrowserOwnersWhere((ownerKey) => ownerKey === ref);
 
     expect(destroyBrowserView).toHaveBeenCalledWith({ browserId: browserResourceID(ref) });
     expect(destroyBrowserView).toHaveBeenCalledWith({
@@ -156,7 +153,7 @@ describe("browser resources", () => {
   });
 
   it("retains failed native cleanup for an idempotent retry", async () => {
-    const ref = openCodeSessionRef(server.key, "ses_retry_cleanup");
+    const ref = "ses_retry_cleanup";
     const destroyBrowserView = stubDesktopBrowserBridge(
       vi
         .fn<() => Promise<void>>()
@@ -178,7 +175,7 @@ describe("browser resources", () => {
   });
 
   it("delivers navigation requests without treating them as committed history", () => {
-    const ref = openCodeSessionRef(server.key, "ses_navigation_request");
+    const ref = "ses_navigation_request";
     const resource = browserResourceFor(ref);
     let navigationCount = 0;
     const unsubscribe = resource.subscribeNavigation(() => {
@@ -199,6 +196,6 @@ describe("browser resources", () => {
     resource.acknowledgeNavigation(request?.id ?? 0);
     expect(resource.getNavigationRequest()).toBeNull();
     unsubscribe();
-    removeBrowserSessions(server.key, [ref.sessionID]);
+    removeBrowserOwners([ref]);
   });
 });

@@ -1,9 +1,6 @@
 import * as stylex from "@stylexjs/stylex";
-import type {
-  OpenCodeClient,
-  OpenCodeFileSystemEntry,
-  OpenCodeVcsFileStatus,
-} from "@honk/opencode";
+import type { Files, Git, HonkClient } from "@honk/core";
+import type { Workspace } from "@honk/core/workspace";
 import { Button, FileTypeIcon, Icon, IconButton, Spinner, Text } from "@honk/ui";
 import {
   IconArrowRotateClockwise,
@@ -24,22 +21,22 @@ import {
 import { basename, normalizePathSeparators } from "@honk/shared/paths";
 import * as React from "react";
 
+import { getHonkClient } from "./chat/client";
 import { errorMessage } from "./error-message";
-import { getBoundOpenCodeClient } from "./watch-registry";
 import { WorkbenchFileViewer } from "./workbench-file-viewer";
 
-// OpenCode V2 exposes `fs.list` (direct children of one directory) and `fs.find` (a ranked fuzzy
-// search that requires a query and caps its results). There is no recursive listing route, so the
-// explorer fetches one directory per expansion and caches it. Directory rows expand; file rows select
-// a read-only viewer in the adjacent editor region. Neither writes: OpenCode V2 has no write route.
+// Honk Core exposes `files.list` (direct children of one directory) and `files.find` (a capped
+// substring search). There is no recursive listing route, so the explorer fetches one directory per
+// expansion and caches it. Directory rows expand; file rows select a viewer in the adjacent editor
+// region.
 //
-// `fs.list` is a raw readdir: no gitignore filtering, no hidden filtering, no ignored flag. `.git`
-// and `node_modules` come back like anything else and stay as single collapsed rows; Honk has no
-// ignore data and will not invent an exclusion list.
+// `files.list` is a raw readdir: no gitignore filtering, no hidden filtering, no ignored flag.
+// `.git` and `node_modules` come back like anything else and stay as single collapsed rows; Honk
+// has no ignore data and will not invent an exclusion list.
 
 const FILES_RESOURCE_GRACE_MS = 30_000;
 const ROOT_PATH = "";
-const NOT_CONNECTED_MESSAGE = "Honk is not connected to OpenCode.";
+const NOT_CONNECTED_MESSAGE = "Honk Core is not connected yet.";
 // Cursor's explorer stays scannable at the workbench minimum without overtaking file content.
 const EXPLORER_MIN_WIDTH = "160px";
 const EXPLORER_MAX_WIDTH = "240px";
@@ -58,9 +55,9 @@ type FilesDirState =
 type FilesSnapshot = {
   readonly dirs: ReadonlyMap<string, FilesDirState>;
   readonly expanded: ReadonlySet<string>;
-  // Git decorations Honk's data can express. `vcs.status` folds untracked into "added" and drops
+  // Git decorations Honk's data can express. `git.status` folds untracked into "added" and drops
   // the raw porcelain code, so there is no U/R/C/ignored distinction to render.
-  readonly decorations: ReadonlyMap<string, OpenCodeVcsFileStatus["status"]>;
+  readonly decorations: ReadonlyMap<string, Git.ChangeStatus>;
   readonly changedDescendants: ReadonlyMap<string, number>;
 };
 
@@ -73,20 +70,23 @@ type FilesResource = {
   readonly observeThreadRunning: (isRunning: boolean) => void;
 };
 
-type FilesClient = Pick<OpenCodeClient, "files" | "vcs">;
+type FilesClient = {
+  readonly files: Pick<HonkClient["files"], "list">;
+  readonly git: Pick<HonkClient["git"], "status">;
+};
 type FilesClientResolver = () => FilesClient | null;
 
 const filesResources = new Map<string, FilesResource>();
 const INITIAL_FILES_SNAPSHOT: FilesSnapshot = Object.freeze({
   dirs: new Map<string, FilesDirState>(),
   expanded: new Set<string>(),
-  decorations: new Map<string, OpenCodeVcsFileStatus["status"]>(),
+  decorations: new Map<string, Git.ChangeStatus>(),
   changedDescendants: new Map<string, number>(),
 });
 
 function createFilesResource(
-  directory: string,
-  resolveClient: FilesClientResolver = getBoundOpenCodeClient,
+  workspaceId: Workspace.WorkspaceId,
+  resolveClient: FilesClientResolver = getHonkClient,
 ): FilesResource {
   let snapshot = INITIAL_FILES_SNAPSHOT;
   let requested = false;
@@ -117,10 +117,10 @@ function createFilesResource(
     // A refresh of an already-listed directory keeps its rows on screen instead of blanking them.
     if (snapshot.dirs.get(path)?.phase !== "ready") publishDir(path, { phase: "loading" });
     void client.files
-      .list(path === ROOT_PATH ? undefined : path, { directory })
+      .list({ workspaceId, ...(path === ROOT_PATH ? {} : { path }) })
       .then((result) => {
         if (currentGeneration !== generation) return;
-        publishDir(path, { phase: "ready", entries: Object.freeze(result.data.flatMap(toEntry)) });
+        publishDir(path, { phase: "ready", entries: Object.freeze(result.flatMap(toEntry)) });
       })
       .catch((error: unknown) => {
         if (currentGeneration !== generation) return;
@@ -134,15 +134,15 @@ function createFilesResource(
       });
   };
 
-  // Decorations are additive: a repository-less directory or a failing `vcs.status` leaves the tree
+  // Decorations are additive: a repository-less directory or a failing `git.status` leaves the tree
   // uncoloured rather than blocking or erroring the listing it annotates.
   const loadDecorations = (): void => {
     const client = resolveClient();
     if (client === null) return;
     const currentGeneration = generation;
-    void client.vcs
-      .status({ directory })
-      .then((files) => {
+    void client.git
+      .status({ workspaceId })
+      .then(({ files }) => {
         if (currentGeneration !== generation) return;
         publish({ ...snapshot, ...buildDecorations(files) });
       })
@@ -172,7 +172,7 @@ function createFilesResource(
         listeners.delete(listener);
         if (listeners.size === 0) {
           releaseTimer = setTimeout(() => {
-            if (listeners.size === 0) filesResources.delete(directory);
+            if (listeners.size === 0) filesResources.delete(workspaceId);
           }, FILES_RESOURCE_GRACE_MS);
         }
       };
@@ -194,31 +194,31 @@ function createFilesResource(
   };
 }
 
-function filesResourceFor(directory: string): FilesResource {
-  const existing = filesResources.get(directory);
+function filesResourceFor(workspaceId: Workspace.WorkspaceId): FilesResource {
+  const existing = filesResources.get(workspaceId);
   if (existing !== undefined) return existing;
-  const created = createFilesResource(directory);
-  filesResources.set(directory, created);
+  const created = createFilesResource(workspaceId);
+  filesResources.set(workspaceId, created);
   return created;
 }
 
-// `fs.list` returns location-relative paths and marks directories with a trailing platform
-// separator, so a Windows sidecar sends `src\lib\`. Normalize both before they reach render or the
-// decoration lookup, and drop anything that normalizes away.
-function toEntry(raw: OpenCodeFileSystemEntry): readonly FilesEntry[] {
+// `files.list` answers workspace-relative paths. Normalize separators before they reach render or
+// the decoration lookup, and drop anything that normalizes away. A symlink renders as a file row:
+// reads resolve it below the workspace root or refuse, so the viewer stays the honest probe.
+function toEntry(raw: Files.Entry): readonly FilesEntry[] {
   const path = normalizePathSeparators(raw.path).replace(/\/+$/, "");
   if (path.length === 0) return [];
-  return [{ path, name: basename(path), type: raw.type }];
+  return [{ path, name: basename(path), type: raw.kind === "directory" ? "directory" : "file" }];
 }
 
-// `vcs.status` returns the whole changed set in one call, so a directory's rollup is a prefix count
-// rather than another listing. Paths are Git porcelain paths, relative to the repository root — the
-// same assumption the Changes panel already makes about this directory.
-function buildDecorations(files: readonly OpenCodeVcsFileStatus[]): {
-  readonly decorations: ReadonlyMap<string, OpenCodeVcsFileStatus["status"]>;
+// `git.status` returns the whole changed set in one call, so a directory's rollup is a prefix count
+// rather than another listing. Paths are workspace-relative — the same shape `files.list` answers,
+// so the two maps join without translation.
+function buildDecorations(files: readonly Git.FileChange[]): {
+  readonly decorations: ReadonlyMap<string, Git.ChangeStatus>;
   readonly changedDescendants: ReadonlyMap<string, number>;
 } {
-  const decorations = new Map<string, OpenCodeVcsFileStatus["status"]>();
+  const decorations = new Map<string, Git.ChangeStatus>();
   const changedDescendants = new Map<string, number>();
   for (const file of files) {
     const path = normalizePathSeparators(file.file);
@@ -235,7 +235,7 @@ function buildDecorations(files: readonly OpenCodeVcsFileStatus[]): {
   return { decorations, changedDescendants };
 }
 
-function fileStatusGlyph(status: OpenCodeVcsFileStatus["status"]): "A" | "D" | "M" {
+function fileStatusGlyph(status: Git.ChangeStatus): "A" | "D" | "M" {
   switch (status) {
     case "added":
       return "A";
@@ -422,7 +422,7 @@ const styles = stylex.create({
   },
 });
 
-function statusColorStyle(status: OpenCodeVcsFileStatus["status"]) {
+function statusColorStyle(status: Git.ChangeStatus) {
   if (status === "added") return styles.statusAdded;
   if (status === "deleted") return styles.statusDeleted;
   return styles.statusModified;
@@ -462,19 +462,21 @@ function buildRows(dirPath: string, depth: number, snapshot: FilesSnapshot): rea
 }
 
 function WorkbenchFiles({
+  workspaceId,
   directory,
   isThreadRunning,
   isVisible,
   selectedPath,
   onOpenFile,
 }: {
+  readonly workspaceId: Workspace.WorkspaceId;
   readonly directory: string;
   readonly isThreadRunning: boolean;
   readonly isVisible: boolean;
   readonly selectedPath: string | null;
   readonly onOpenFile: (path: string) => void;
 }): React.ReactElement {
-  const resource = filesResourceFor(directory);
+  const resource = filesResourceFor(workspaceId);
   const snapshot = React.useSyncExternalStore(
     resource.subscribe,
     resource.getSnapshot,
@@ -583,7 +585,7 @@ function WorkbenchFiles({
         ) : (
           <WorkbenchFileViewer
             path={selectedPath}
-            directory={directory}
+            workspaceId={workspaceId}
             isThreadRunning={isThreadRunning}
             isVisible={isVisible}
           />
@@ -609,7 +611,7 @@ function FilesEntryRow({
   readonly isExpanded: boolean;
   readonly isLoading: boolean;
   readonly isSelected: boolean;
-  readonly decoration: OpenCodeVcsFileStatus["status"] | undefined;
+  readonly decoration: Git.ChangeStatus | undefined;
   readonly changedDescendants: number;
   readonly onSelect: (path: string) => void;
   readonly onToggle: (path: string) => void;

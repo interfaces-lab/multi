@@ -19,7 +19,7 @@ import {
   IconExclamationCircle,
 } from "@honk/ui/icons";
 import * as React from "react";
-import { useSyncExternalStore } from "react";
+import { useRouterState } from "@tanstack/react-router";
 
 import {
   actions as toastActions,
@@ -28,7 +28,6 @@ import {
   type ToastItem,
   type ToastType,
 } from "./toast-store";
-import { getSnapshot as getTabSnapshot, subscribe as subscribeTabs } from "./tab-store";
 
 // Entrance slide offset. Motion geometry, not a spacing token.
 const TOAST_ENTER_OFFSET = "12px";
@@ -120,14 +119,7 @@ const styles = stylex.create({
   },
 });
 
-type ToneStyle =
-  | typeof styles.toneError
-  | typeof styles.toneSuccess
-  | typeof styles.toneWarning
-  | typeof styles.toneInfo
-  | typeof styles.toneLoading;
-
-function toneStyle(type: ToastType): ToneStyle {
+function toneStyle(type: ToastType) {
   switch (type) {
     case "error":
       return styles.toneError;
@@ -184,7 +176,7 @@ function ToastTypeIcon(props: { type: ToastType }): React.ReactElement {
 function CopyErrorButton(props: { text: string }): React.ReactElement {
   const [isCopied, setCopied] = React.useState(false);
   // Cleared on the next click so rapid copies do not leave a stale timeout.
-  const timerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+  const timerRef = React.useRef<number | null>(null);
 
   return (
     <IconButton
@@ -199,7 +191,7 @@ function CopyErrorButton(props: { text: string }): React.ReactElement {
         void navigator.clipboard.writeText(props.text).then(
           () => {
             setCopied(true);
-            timerRef.current = setTimeout(() => {
+            timerRef.current = window.setTimeout(() => {
               setCopied(false);
               timerRef.current = null;
             }, COPY_CONFIRM_MS);
@@ -269,18 +261,15 @@ function ToastCard(props: { toast: ToastItem }): React.ReactElement {
   );
 }
 
-function useActiveTabKey(): string {
-  return useSyncExternalStore(subscribeTabs, getActiveTabKey, getActiveTabKey);
-}
-
-function getActiveTabKey(): string {
-  return getTabSnapshot().activeKey;
-}
-
 function ToastViewport(): React.ReactElement | null {
   const { toasts } = useToasts();
-  const activeKey = useActiveTabKey();
-  const visible = toasts.filter((toast) => shouldRenderToast(toast, activeKey));
+  const activeSessionId = useRouterState({
+    select: (state) =>
+      state.location.pathname.startsWith("/chat/")
+        ? state.location.pathname.slice("/chat/".length)
+        : null,
+  });
+  const visible = toasts.filter((toast) => shouldRenderToast(toast, activeSessionId));
 
   if (visible.length === 0) {
     return null;

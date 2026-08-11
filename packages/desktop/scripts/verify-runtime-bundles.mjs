@@ -110,6 +110,20 @@ for (const file of files) {
   }
 }
 
+// Pi loads OAuth flow modules through a bundler-opaque dynamic import, so a
+// bundle can silently ship without them and every interactive login fails at
+// runtime (the host registers them statically via registerBunOAuthFlows).
+// The Anthropic flow's fixed PKCE callback port is the cheapest stable marker
+// that the flow code made it into the main bundle.
+const mainSources = await Promise.all(
+  files.filter((file) => file.startsWith("out/main")).map((file) => readFile(file, "utf8")),
+);
+if (!mainSources.some((source) => source.includes("53692"))) {
+  violations.push(
+    "out/main: Pi OAuth flow modules are missing from the bundle; models.login would fail in the packaged app",
+  );
+}
+
 if (violations.length > 0) {
   for (const violation of new Set(violations)) console.error(violation);
   process.exit(1);

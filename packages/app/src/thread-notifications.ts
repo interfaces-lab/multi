@@ -1,65 +1,62 @@
-// Workspace watch subscriber for attention, completion, and failure alerts.
-// Install from main.tsx, never from a component effect.
+// Core inventory subscriber for completion alerts.
+// Install from start-app, never from a component effect.
 
-import { openCodeSessionKey, openCodeSessionRef } from "@honk/opencode";
+import type { Session } from "@honk/core/session";
 import type { DesktopThreadNotificationTarget } from "@honk/shared/desktop-api";
 import { basename } from "@honk/shared/paths";
-import { play } from "cuelume";
 
 import {
   actions as appSettingsActions,
   getSnapshot as getAppSettingsSnapshot,
 } from "./app-settings-store";
 import type { AlertSoundSelection } from "./alert-sound-model";
-import { tabStatusFromSummary } from "./command-menu-model";
+import { getInventorySnapshot, retainInventory, subscribeInventory } from "./chat/inventory-store";
 import { installAlertSoundPlayback, playAlertSound } from "./completion-sound";
 import {
   showDesktopThreadNotification,
   subscribeDesktopThreadNotificationActivate,
 } from "./desktop-bridge";
 import { isWindowForeground, showSystemThreadNotification } from "./notification-permission";
-import type { AppSessionSummary } from "./open-code-view";
-import { actions as tabActions, getSnapshot as getTabSnapshot } from "./tab-store";
+import { router } from "./router";
 import { actions as toastActions } from "./toast-store";
-import { getSessionInventoryWatchSnapshot, subscribeSessionInventoryWatch } from "./watch-registry";
 
-type ThreadSummary = AppSessionSummary;
+type ThreadSummary = Session.SessionSummary;
 
 type TrackedThread = {
-  readonly needsAttention: boolean;
-  readonly status: ThreadSummary["status"];
-  readonly title: string;
+  readonly working: boolean;
 };
 
 const MAX_TRACKED = 200;
 
 const previousByKey = new Map<string, TrackedThread>();
 let installed = false;
+let releaseInventory: (() => void) | null = null;
 let unsubscribeWatch: (() => void) | null = null;
 let unsubscribeNotificationActivate: (() => void) | null = null;
 let uninstallAlertSoundPlayback: (() => void) | null = null;
 
-function threadLabel(title: string): string {
-  const trimmed = title.trim();
-  return trimmed.length > 0 ? trimmed : "Untitled thread";
+function threadLabel(thread: ThreadSummary): string {
+  const label = (thread.title ?? basename(thread.directory)).trim();
+  return label.length > 0 ? label : "Untitled thread";
+}
+
+function threadWorking(thread: ThreadSummary): boolean {
+  return thread.phase !== "idle";
 }
 
 // Plain fields only, so a desktop notification click can reopen the thread from
 // the main process even after the raising renderer is gone.
 function threadTarget(thread: ThreadSummary): DesktopThreadNotificationTarget {
   return {
-    key: summaryKey(thread),
-    title: thread.title,
-    status: tabStatusFromSummary(thread),
-    repository:
-      thread.worktree?.path === undefined || thread.worktree.path === null
-        ? { state: "loading" }
-        : { state: "ready", label: basename(thread.worktree.path) },
+    key: thread.id,
+    title: threadLabel(thread),
+    status: threadWorking(thread) ? "working" : "idle",
+    repository: { state: "ready", label: basename(thread.directory) },
   };
 }
 
 function openThreadTarget(target: DesktopThreadNotificationTarget): void {
-  tabActions.open({ kind: "thread", ...target });
+  void router.navigate({ to: "/chat/$sessionId", params: { sessionId: target.key } });
 }
 
 function openThread(thread: ThreadSummary): void {
@@ -68,15 +65,11 @@ function openThread(thread: ThreadSummary): void {
 
 // Desktop sends the click through the main process, which survives a hidden or
 // recreated window. Web keeps the in-page Web Notification click handler.
-function notifyThread(input: {
-  readonly title: string;
-  readonly body: string;
-  readonly thread: ThreadSummary;
-}): void {
+function notifyThread(input: { readonly body: string; readonly thread: ThreadSummary }): void {
   const target = threadTarget(input.thread);
   if (
     showDesktopThreadNotification({
-      title: input.title,
+      title: target.title,
       body: input.body,
       threadId: input.thread.id,
       target,
@@ -85,7 +78,7 @@ function notifyThread(input: {
     return;
   }
   showSystemThreadNotification({
-    title: input.title,
+    title: target.title,
     body: input.body,
     threadId: input.thread.id,
     onClick: () => {
@@ -94,20 +87,8 @@ function notifyThread(input: {
   });
 }
 
-function summaryKey(summary: Pick<ThreadSummary, "id" | "server">): string {
-  return openCodeSessionKey(openCodeSessionRef(summary.server, summary.id));
-}
-
-function isActiveThread(thread: ThreadSummary): boolean {
-  return getTabSnapshot().activeKey === summaryKey(thread);
-}
-
-function trackSummary(summary: ThreadSummary): TrackedThread {
-  return Object.freeze({
-    needsAttention: summary.needsAttention,
-    status: summary.status,
-    title: summary.title,
-  });
+function activeThread(thread: ThreadSummary): boolean {
+  return router.state.location.pathname === `/chat/${thread.id}`;
 }
 
 function capMemory(nextIds: ReadonlySet<string>): void {
@@ -126,47 +107,14 @@ function capMemory(nextIds: ReadonlySet<string>): void {
   }
 }
 
-function emitAttention(summary: ThreadSummary): void {
-  if (isActiveThread(summary)) {
-    return;
-  }
-
-  const label = threadLabel(summary.title);
-  toastActions.addAttention({
-    type: "warning",
-    title: `Needs you — ${label}`,
-    description: "Needs you.",
-    action: {
-      label: "Open",
-      run: () => {
-        openThread(summary);
-      },
-    },
-  });
-
-  const appSettings = getAppSettingsSnapshot();
-  if (appSettings.alertSoundsEnabled) {
-    playConfiguredAlertSound(appSettings.alertSoundSelection, appSettings.customAlertSoundFileName);
-  }
-
-  if (!isWindowForeground() && appSettings.notifyWhenThreadNeedsInput) {
-    notifyThread({
-      title: `Needs you — ${label}`,
-      body: "Needs you.",
-      thread: summary,
-    });
-  }
-}
-
 function emitCompletion(summary: ThreadSummary): void {
-  if (isActiveThread(summary)) {
+  if (activeThread(summary)) {
     return;
   }
 
-  const label = threadLabel(summary.title);
   toastActions.add({
     type: "info",
-    title: label,
+    title: threadLabel(summary),
     description: "Finished working.",
     action: {
       label: "Open",
@@ -183,40 +131,7 @@ function emitCompletion(summary: ThreadSummary): void {
 
   if (!isWindowForeground() && appSettings.notifyWhenThreadFinishes) {
     notifyThread({
-      title: label,
       body: "Finished working.",
-      thread: summary,
-    });
-  }
-}
-
-function emitFailure(summary: ThreadSummary): void {
-  if (isActiveThread(summary)) {
-    return;
-  }
-
-  const label = threadLabel(summary.title);
-  toastActions.add({
-    type: "error",
-    title: `Failed — ${label}`,
-    description: "Stopped with an error.",
-    action: {
-      label: "Open",
-      run: () => {
-        openThread(summary);
-      },
-    },
-  });
-
-  const appSettings = getAppSettingsSnapshot();
-  if (appSettings.alertSoundsEnabled) {
-    play("error");
-  }
-
-  if (!isWindowForeground() && appSettings.notifyWhenThreadFinishes) {
-    notifyThread({
-      title: `Failed — ${label}`,
-      body: "Stopped with an error.",
       thread: summary,
     });
   }
@@ -240,67 +155,60 @@ function playConfiguredAlertSound(
   });
 }
 
-function onWorkspaceChange(): void {
-  const { state } = getSessionInventoryWatchSnapshot();
-  if (state === null) {
+function onInventoryChange(): void {
+  const inventory = getInventorySnapshot();
+  if (inventory.status !== "ready") {
     return;
   }
 
-  const threads = state.rootSessions;
-  const nextIds = new Set(threads.map(summaryKey));
+  // Delegation-owned sessions stay out of top-level surfaces; they alert nobody.
+  const threads = inventory.sessions.filter((session) => session.delegation === undefined);
+  const nextIds = new Set(threads.map((thread) => thread.id));
 
   for (const summary of threads) {
-    const key = summaryKey(summary);
-    const previous = previousByKey.get(key);
+    const previous = previousByKey.get(summary.id);
     if (previous === undefined) {
-      // Seed on first sighting so a full workspace boot does not alert.
-      previousByKey.set(key, trackSummary(summary));
+      // Seed on first sighting so a full inventory boot does not alert.
+      previousByKey.set(summary.id, { working: threadWorking(summary) });
       continue;
     }
 
-    if (summary.status === "failed" && previous.status !== "failed") {
-      emitFailure(summary);
-      previousByKey.set(key, trackSummary(summary));
-      continue;
-    }
-
-    if (summary.needsAttention && !previous.needsAttention) {
-      emitAttention(summary);
-      previousByKey.set(key, trackSummary(summary));
-      continue;
-    }
-
-    if (previous.status === "running" && summary.status === "idle") {
+    if (previous.working && !threadWorking(summary)) {
       emitCompletion(summary);
     }
 
-    previousByKey.set(key, trackSummary(summary));
+    previousByKey.set(summary.id, { working: threadWorking(summary) });
   }
 
   capMemory(nextIds);
 }
 
 /**
- * Subscribe to the workspace watch and emit attention/completion signals.
- * Idempotent; call once from main.tsx after bindRouter / installDesktopBridge.
+ * Subscribe to core's session inventory and emit completion signals.
+ * Idempotent; call once from start-app.
  */
 export function installThreadNotifications(): void {
   if (installed) {
     return;
   }
   installed = true;
-  // Desktop notification clicks arrive from the main process; route them to the tab.
+  // Desktop notification clicks arrive from the main process; route them to the thread.
   unsubscribeNotificationActivate = subscribeDesktopThreadNotificationActivate(openThreadTarget);
   uninstallAlertSoundPlayback = installAlertSoundPlayback();
-  // Seed from whatever the registry already has (may be connecting/null).
-  onWorkspaceChange();
-  unsubscribeWatch = subscribeSessionInventoryWatch(onWorkspaceChange);
+  // Hold the inventory watch open for the app lifetime: alerts must fire
+  // while no surface shows the list.
+  releaseInventory = retainInventory();
+  // Seed from whatever the store already folded (may be connecting/empty).
+  onInventoryChange();
+  unsubscribeWatch = subscribeInventory(onInventoryChange);
 }
 
 /** Test and hot-reload only. */
 export function uninstallThreadNotifications(): void {
   unsubscribeWatch?.();
   unsubscribeWatch = null;
+  releaseInventory?.();
+  releaseInventory = null;
   unsubscribeNotificationActivate?.();
   unsubscribeNotificationActivate = null;
   uninstallAlertSoundPlayback?.();

@@ -18,10 +18,6 @@ const desktopOutDir = resolve(currentDir, "out");
 
 const port = Number(process.env.PORT ?? 5733);
 const host = process.env.HOST?.trim() || "localhost";
-const configuredHttpUrl = process.env.VITE_HTTP_URL?.trim();
-const sidecarPort = process.env.HONK_OPENCODE_PORT?.trim();
-const resolvedHttpUrl =
-  configuredHttpUrl ?? (sidecarPort ? `http://127.0.0.1:${sidecarPort}` : undefined);
 const sourcemapEnv = process.env.HONK_WEB_SOURCEMAP?.trim().toLowerCase();
 
 const buildSourcemap =
@@ -142,7 +138,6 @@ export default defineConfig({
       exclude: ["@honk/ui"],
     },
     define: {
-      "import.meta.env.VITE_HTTP_URL": JSON.stringify(resolvedHttpUrl ?? ""),
       "import.meta.env.APP_VERSION": JSON.stringify(pkg.version),
     },
     resolve: {

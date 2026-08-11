@@ -4,14 +4,7 @@
 import * as stylex from "@stylexjs/stylex";
 import { Button, Icon, IconButton, Text, Tooltip } from "@honk/ui";
 import { IconStepBack } from "@honk/ui/icons";
-import {
-  borderVars,
-  colorVars,
-  controlVars,
-  fontVars,
-  radiusVars,
-  spaceVars,
-} from "@honk/ui/tokens.stylex";
+import { borderVars, colorVars, controlVars, radiusVars, spaceVars } from "@honk/ui/tokens.stylex";
 import * as React from "react";
 
 // Cursor collapses a row to a stack at 500px, as a container query on the pane duplicated as a
@@ -150,49 +143,7 @@ const styles = stylex.create({
     alignItems: "center",
     gap: controlVars["--honk-control-gap"],
   },
-  skeleton: {
-    alignSelf: "stretch",
-  },
-  skeletonLine: {
-    width: "100%",
-    height: fontVars["--honk-leading-body"],
-    borderRadius: radiusVars["--honk-radius-control"],
-    backgroundColor: colorVars["--honk-color-layer-02"],
-  },
-  skeletonDetailLine: {
-    height: fontVars["--honk-leading-detail"],
-  },
-  skeletonControl: {
-    width: controlVars["--honk-control-h-lg"],
-    height: controlVars["--honk-control-h-md"],
-    borderRadius: radiusVars["--honk-radius-control"],
-    backgroundColor: colorVars["--honk-color-layer-02"],
-  },
 });
-
-const SETTINGS_SKELETON_ROWS = ["first", "second", "third", "fourth"] as const;
-
-export function SettingsPanelSkeleton(props: { readonly label: string }): React.ReactElement {
-  return (
-    <div
-      role="status"
-      aria-label={`Loading ${props.label} settings`}
-      {...stylex.props(styles.rows, styles.skeleton)}
-    >
-      {SETTINGS_SKELETON_ROWS.map((row) => (
-        <div key={row} aria-hidden="true" {...stylex.props(styles.row)}>
-          <div {...stylex.props(styles.rowCopy)}>
-            <div {...stylex.props(styles.skeletonLine)} />
-            <div {...stylex.props(styles.skeletonLine, styles.skeletonDetailLine)} />
-          </div>
-          <div {...stylex.props(styles.rowControl)}>
-            <div {...stylex.props(styles.skeletonControl)} />
-          </div>
-        </div>
-      ))}
-    </div>
-  );
-}
 
 export function SettingResetButton(props: {
   readonly label: string;

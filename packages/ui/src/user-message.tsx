@@ -67,6 +67,15 @@ const styles = stylex.create({
   footer: {
     marginTop: conversationVars["--honk-conversation-row-gap"],
   },
+  // Pointer input belongs to the whole bubble. This zero-layout control enters
+  // only for keyboard focus, while remaining a real button for assistive tech.
+  editAction: {
+    position: "absolute",
+    insetBlockEnd: spaceVars["--honk-space-gutter"],
+    insetInlineEnd: spaceVars["--honk-space-gutter"],
+    opacity: { default: 0, ":has(:focus-visible)": 1 },
+    pointerEvents: { default: "none", ":has(:focus-visible)": "auto" },
+  },
   previewRoot: {
     display: "flex",
     flexDirection: "column",
@@ -102,6 +111,7 @@ interface UserMessageProps {
   children?: React.ReactNode;
   footer?: React.ReactNode | undefined;
   onEdit?: ((element: HTMLDivElement) => void) | undefined;
+  editActionRef?: React.Ref<HTMLButtonElement> | undefined;
   style?: StyleProp<HonkStyle>;
 }
 
@@ -177,8 +187,10 @@ function UserMessageRoot({
   children,
   footer,
   onEdit,
+  editActionRef,
   style,
 }: UserMessageProps): React.ReactElement {
+  const bubbleRef = React.useRef<HTMLDivElement | null>(null);
   const beginEdit = (event: React.MouseEvent<HTMLDivElement>): void => {
     if (onEdit === undefined) return;
     const selection = window.getSelection();
@@ -194,20 +206,31 @@ function UserMessageRoot({
   return (
     <div {...stylex.props(styles.row)}>
       <div
+        ref={bubbleRef}
         data-message-bubble="user"
         data-message-bubble-surface=""
         data-cursor-pointer-control={onEdit === undefined ? undefined : ""}
-        {...(onEdit === undefined
-          ? {}
-          : {
-              onClick: beginEdit,
-            })}
+        {...(onEdit === undefined ? {} : { onClick: beginEdit })}
         {...applyStyle(stylex.props(styles.bubble), style)}
       >
         <div {...stylex.props(styles.content)}>
           {children}
           {footer != null && <div {...stylex.props(styles.footer)}>{footer}</div>}
         </div>
+        {onEdit === undefined ? null : (
+          <div {...stylex.props(styles.editAction)}>
+            <Button
+              ref={editActionRef}
+              variant="quiet"
+              size="sm"
+              onClick={() => {
+                if (bubbleRef.current !== null) onEdit(bubbleRef.current);
+              }}
+            >
+              Edit
+            </Button>
+          </div>
+        )}
       </div>
     </div>
   );

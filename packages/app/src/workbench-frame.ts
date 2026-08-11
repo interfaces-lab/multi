@@ -1,27 +1,22 @@
-import {
-  openCodeLocationKey,
-  type OpenCodeLocationRef,
-  type OpenCodeSessionRef,
-} from "@honk/opencode";
+// The workbench's identity is Honk Core's: one chat session in one trusted
+// workspace. Every workbench surface keys on these values and nothing else,
+// so the producer (the chat thread page) is the single place that resolves
+// them.
 
-import type { SubmittedPlanRecord } from "./thread/follow-up";
-import type { PlanExecutionProjection } from "./thread/plan-execution";
-import type { ToolTodo } from "./tool-part-projection";
+import type { Session } from "@honk/core/session";
+import type { Workspace } from "@honk/core/workspace";
 
-type ResolvedWorkbenchFrame = {
-  readonly workspaceKey: string;
-  readonly sessionRef: OpenCodeSessionRef;
-  readonly directory: string;
-  readonly isThreadRunning: boolean;
-  readonly buildAgent: string;
-  readonly plan: SubmittedPlanRecord | null;
-  readonly planExecution: PlanExecutionProjection | null;
-  readonly tasks: readonly ToolTodo[];
+/** Core identity for one workbench: the chat session and its trusted workspace. */
+type WorkbenchSessionRef = {
+  readonly sessionId: Session.SessionId;
+  readonly workspaceId: Workspace.WorkspaceId;
 };
 
-function workbenchWorkspaceKey(ref: OpenCodeSessionRef, location: OpenCodeLocationRef): string {
-  return openCodeLocationKey(ref.server, location);
-}
+type ResolvedWorkbenchFrame = {
+  readonly sessionRef: WorkbenchSessionRef;
+  /** The workspace directory on disk — terminals and labels need the path, not the id. */
+  readonly directory: string;
+  readonly isThreadRunning: boolean;
+};
 
-export { workbenchWorkspaceKey };
-export type { ResolvedWorkbenchFrame };
+export type { ResolvedWorkbenchFrame, WorkbenchSessionRef };

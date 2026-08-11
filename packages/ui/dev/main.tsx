@@ -2110,7 +2110,7 @@ function DialogStory(): React.ReactElement {
   return (
     <Section
       title="Dialog — a centered modal (Base UI)"
-      note="A Button opens a centered portalled modal. The dropdown keeps its trigger-derived transform origin above the dialog layer. Customize opens a structurally nested dialog: Base UI suppresses its backdrop and blocks dismiss passthrough, while the parent recedes behind it. Escape closes only the topmost popup."
+      note="A Button opens a centered portalled modal. The dropdown keeps its trigger-derived transform origin above the dialog layer. Customize opens a structurally nested dialog: Base UI suppresses its backdrop and blocks dismiss passthrough, while the parent keeps its size and position. Escape closes only the topmost popup."
     >
       <div {...stylex.props(styles.specRow)}>
         <Dialog.Root>

@@ -1,3 +1,7 @@
+// Right-click chrome for the tab strip, loaded lazily from the shell.
+// "New thread" opens the start page for every tab: core has no draft concept,
+// so a workspace-preselected new thread is not reproducible yet.
+
 import { ContextMenu, Icon, type TabDescriptor } from "@honk/ui";
 import { IconClipboard, IconCrossSmall, IconPlusSmall } from "@honk/ui/icons";
 import * as React from "react";
@@ -21,11 +25,11 @@ function copyWorkspacePath(path: string): void {
   );
 }
 
-function OpenTabContextMenu(props: {
+export function TabContextMenu(props: {
   readonly tab: TabDescriptor;
   readonly children: React.ReactElement;
 }): React.ReactElement {
-  const hasPath = props.tab.kind !== "home" && props.tab.path !== undefined;
+  const path = props.tab.kind === "home" ? undefined : props.tab.path;
   const canClose = props.tab.kind !== "home";
 
   return (
@@ -34,11 +38,7 @@ function OpenTabContextMenu(props: {
       <ContextMenu.Popup>
         <ContextMenu.Item
           onClick={() => {
-            if (props.tab.kind === "home") {
-              tabActions.openNew();
-              return;
-            }
-            tabActions.openNewInWorkspace(props.tab.key);
+            tabActions.openNew();
           }}
         >
           <ContextMenu.ItemIcon>
@@ -46,13 +46,9 @@ function OpenTabContextMenu(props: {
           </ContextMenu.ItemIcon>
           New thread
         </ContextMenu.Item>
-        {hasPath ? (
+        {path === undefined ? null : (
           <ContextMenu.Item
             onClick={() => {
-              const path = props.tab.kind === "home" ? undefined : props.tab.path;
-              if (path === undefined) {
-                return;
-              }
               copyWorkspacePath(path);
             }}
           >
@@ -61,7 +57,7 @@ function OpenTabContextMenu(props: {
             </ContextMenu.ItemIcon>
             Copy workspace path
           </ContextMenu.Item>
-        ) : null}
+        )}
         {canClose ? (
           <>
             <ContextMenu.Separator />
@@ -75,7 +71,7 @@ function OpenTabContextMenu(props: {
               </ContextMenu.ItemIcon>
               Close tab
             </ContextMenu.Item>
-            {hasPath ? (
+            {path === undefined ? null : (
               <ContextMenu.Item
                 onClick={() => {
                   tabActions.closeWorkspaceTabs(props.tab.key);
@@ -86,61 +82,10 @@ function OpenTabContextMenu(props: {
                 </ContextMenu.ItemIcon>
                 Close workspace tabs
               </ContextMenu.Item>
-            ) : null}
+            )}
           </>
         ) : null}
       </ContextMenu.Popup>
     </ContextMenu.Root>
   );
 }
-
-function WorkspaceContextMenu(props: {
-  readonly tabKey: string;
-  readonly path?: string;
-  readonly children: React.ReactElement;
-}): React.ReactElement {
-  return (
-    <ContextMenu.Root>
-      <ContextMenu.Trigger render={props.children} />
-      <ContextMenu.Popup>
-        <ContextMenu.Item
-          onClick={() => {
-            tabActions.openNewInWorkspace(props.tabKey);
-          }}
-        >
-          <ContextMenu.ItemIcon>
-            <Icon icon={IconPlusSmall} size="sm" tone="muted" />
-          </ContextMenu.ItemIcon>
-          New thread
-        </ContextMenu.Item>
-        {props.path === undefined ? null : (
-          <ContextMenu.Item
-            onClick={() => {
-              if (props.path !== undefined) {
-                copyWorkspacePath(props.path);
-              }
-            }}
-          >
-            <ContextMenu.ItemIcon>
-              <Icon icon={IconClipboard} size="sm" tone="muted" />
-            </ContextMenu.ItemIcon>
-            Copy workspace path
-          </ContextMenu.Item>
-        )}
-        <ContextMenu.Separator />
-        <ContextMenu.Item
-          onClick={() => {
-            tabActions.closeWorkspaceTabs(props.tabKey);
-          }}
-        >
-          <ContextMenu.ItemIcon>
-            <Icon icon={IconCrossSmall} size="sm" tone="muted" />
-          </ContextMenu.ItemIcon>
-          Close workspace tabs
-        </ContextMenu.Item>
-      </ContextMenu.Popup>
-    </ContextMenu.Root>
-  );
-}
-
-export { OpenTabContextMenu, WorkspaceContextMenu };

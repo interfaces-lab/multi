@@ -5,7 +5,8 @@
 // answers typed, and a session's model survives being chosen.
 
 import { createModels } from "@earendil-works/pi-ai";
-import { fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
+import { builtinModels } from "@earendil-works/pi-ai/providers/all";
+import { fauxAssistantMessage, fauxProvider } from "@earendil-works/pi-ai/providers/faux";
 import { describe, expect, it } from "@effect/vitest";
 import { Effect } from "effect";
 
@@ -94,6 +95,79 @@ describe("the models service", () => {
           .pipe(Effect.flip);
         expect(refused).toBeInstanceOf(Models.UnknownProviderError);
         expect(refused.code).toBe("models.unknown_provider");
+      });
+
+      yield* program.pipe(Effect.provide(modelsLayer));
+    }),
+  );
+
+  it.effect("keeps OpenAI Platform and Codex credentials distinct", () =>
+    Effect.gen(function* () {
+      const credentials = Models.credentialStore(createTestStorage());
+      yield* Effect.promise(() =>
+        credentials.modify("openai-codex", () =>
+          Promise.resolve({
+            type: "oauth",
+            access: "codex-access",
+            refresh: "codex-refresh",
+            expires: 0,
+          }),
+        ),
+      );
+      const collection = builtinModels({
+        credentials,
+        authContext: {
+          env: () => Promise.resolve(undefined),
+          fileExists: () => Promise.resolve(false),
+        },
+      });
+      const modelsLayer = Models.layer({ collection, credentials });
+
+      const program = Effect.gen(function* () {
+        const models = yield* Models.Service;
+        const codex = yield* models.resolveAvailable({
+          providerId: "openai-codex",
+          modelId: "gpt-5.6-sol",
+        });
+        expect(codex.provider).toBe("openai-codex");
+
+        const platform = yield* models
+          .resolveAvailable({ providerId: "openai", modelId: "gpt-5.6-sol" })
+          .pipe(Effect.flip);
+        if (!(platform instanceof Models.ProviderNotConfiguredError)) {
+          throw new Error("expected the unconfigured Platform provider to be refused");
+        }
+        expect(platform.code).toBe("models.provider_not_configured");
+        expect(platform.providerId).toBe("openai");
+      });
+
+      yield* program.pipe(Effect.provide(modelsLayer));
+    }),
+  );
+
+  it.effect("lists only models the current credential can run", () =>
+    Effect.gen(function* () {
+      const storage = createTestStorage();
+      const credentials = Models.credentialStore(storage);
+      const collection = createModels();
+      const faux = fauxProvider();
+      collection.setProvider({
+        ...faux.provider,
+        filterModels: () => [],
+      });
+      const modelsLayer = Models.layer({ collection, credentials });
+
+      const program = Effect.gen(function* () {
+        const models = yield* Models.Service;
+        const listed = yield* models.list({});
+        const provider = listed.providers.find((candidate) => candidate.id === "faux");
+
+        expect(provider?.configured).toBe(true);
+        expect(provider?.models).toEqual([]);
+        const refused = yield* models
+          .resolveAvailable({ providerId: "faux", modelId: faux.getModel().id })
+          .pipe(Effect.flip);
+        expect(refused).toBeInstanceOf(Models.ProviderNotConfiguredError);
       });
 
       yield* program.pipe(Effect.provide(modelsLayer));
@@ -188,7 +262,7 @@ describe("the session's model", () => {
 
       const program = Effect.gen(function* () {
         const models = yield* Models.Service;
-        const refused = yield* models.resolve().pipe(Effect.flip);
+        const refused = yield* models.resolveAvailable().pipe(Effect.flip);
         expect(refused).toBeInstanceOf(Models.NoModelError);
         expect(refused.code).toBe("models.no_model");
       });

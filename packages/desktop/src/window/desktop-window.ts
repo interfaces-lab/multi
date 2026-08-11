@@ -25,7 +25,7 @@ import * as DesktopAppSettings from "../settings/desktop-app-settings";
 import { markStartupMilestone } from "../startup-probe";
 
 const TITLEBAR_HEIGHT = 40;
-// Match OpenCode desktop traffic lights for the bottom-seated tab band.
+// Traffic lights sit low enough to center against the bottom-seated tab band.
 const MACOS_TRAFFIC_LIGHT_X_PX = 14;
 const MACOS_TRAFFIC_LIGHT_Y_PX = 14;
 const TITLEBAR_COLOR = "#01000000"; // #00000000 breaks on Linux
@@ -655,7 +655,7 @@ const make = Effect.gen(function* () {
     handleBackendReady: Effect.gen(function* () {
       yield* Ref.set(state.backendReady, true);
       markStartupMilestone("backend-ready");
-      yield* elog.info("backend ready", { source: "http" });
+      yield* elog.info("backend ready");
       yield* createMainIfBackendReady;
     }).pipe(Effect.withSpan("desktop.window.handleBackendReady")),
     completeOnboarding,

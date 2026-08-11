@@ -26,65 +26,19 @@ import {
   createWriteTool,
 } from "@earendil-works/pi-agent-core";
 
-/**
- * What one tool call says about the paths it wrote.
- *
- * - `none`: the tool cannot write — its calls never affect attribution.
- * - `declared`: the tool writes exactly the paths it names in its arguments.
- * - `opaque`: the tool can write anything, and nothing in its arguments can
- *   stand behind a path list.
- *
- * @category types
- */
-export type ToolWrites =
-  | { readonly kind: "none" }
-  | { readonly kind: "declared"; readonly paths: readonly string[] }
-  | { readonly kind: "opaque" };
+export { writesOf, type ToolWrites } from "./tool-writes";
 
 /**
  * Pi's built-in execution tools, in the order a harness receives them.
  *
  * @category construction
  */
-export const builtins = () =>
-  [createReadTool(), createWriteTool(), createEditTool(), createBashTool()] as const;
-
-/**
- * Classifies one tool call for the attribution gate.
- *
- * Arguments arrive as `unknown` because they come from the model and were
- * validated only against the tool's own schema. A declaring tool whose
- * arguments cannot be read declares nothing rather than guessing — the
- * checkpoint diff still holds the content either way.
- *
- * @example
- * ```ts
- * writesOf("edit", { path: "src/auth.ts", edits: [] });
- * // { kind: "declared", paths: ["src/auth.ts"] }
- * writesOf("bash", { command: "make generate" }); // { kind: "opaque" }
- * writesOf("unknown-mcp-tool", {});               // { kind: "opaque" }
- * ```
- *
- * @category reading
- */
-export const writesOf = (toolName: string, args: unknown): ToolWrites => {
-  switch (toolName) {
-    case "read":
-      return { kind: "none" };
-    case "write":
-    case "edit":
-      return { kind: "declared", paths: declaredPath(args) };
-    default:
-      return { kind: "opaque" };
-  }
-};
-
-/** The shape shared by Pi's writing built-ins: a required `path` argument. */
-const declaredPath = (args: unknown): readonly string[] => {
-  if (typeof args !== "object" || args === null) return [];
-  const path: unknown = (args as { readonly path?: unknown }).path;
-  return typeof path === "string" && path.length > 0 ? [path] : [];
-};
+export const builtins = () => [
+  createReadTool(),
+  createWriteTool(),
+  createEditTool(),
+  createBashTool(),
+];
 
 // oxlint-disable-next-line import/no-self-import -- spec/effect.md self-reexport pattern; star imports are banned for consumers.
 export * as Tools from "./tools";

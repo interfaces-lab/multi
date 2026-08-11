@@ -7,7 +7,6 @@ import type {
 import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
-import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
@@ -16,7 +15,6 @@ import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 
-import * as OpencodeSidecar from "../backend/opencode-sidecar";
 import * as DesktopConfig from "../app/desktop-config";
 import * as DesktopEnvironment from "../app/desktop-environment";
 import * as EffectLogger from "@honk/shared/effect-logger";
@@ -152,7 +150,6 @@ function isArm64HostRunningIntelBuild(runtimeInfo: DesktopRuntimeInfo): boolean 
 
 const make = Effect.gen(function* () {
   const config = yield* DesktopConfig.DesktopConfig;
-  const opencodeSidecar = yield* OpencodeSidecar.OpencodeSidecar;
   const desktopState = yield* DesktopState.DesktopState;
   const electronUpdater = yield* ElectronUpdater.ElectronUpdater;
   const electronWindow = yield* ElectronWindow.ElectronWindow;
@@ -316,7 +313,6 @@ const make = Effect.gen(function* () {
     return yield* Effect.gen(function* () {
       yield* setState(reduceDesktopUpdateStateOnInstallStart(state));
       yield* elog.info("installing update");
-      yield* opencodeSidecar.stop({ timeout: Duration.seconds(5) });
       yield* electronWindow.destroyAll;
       yield* electronUpdater.quitAndInstall({
         isSilent: true,

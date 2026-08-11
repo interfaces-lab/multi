@@ -98,14 +98,6 @@ export const TerminalSessionSnapshot = Schema.Struct({
 });
 export type TerminalSessionSnapshot = typeof TerminalSessionSnapshot.Type;
 
-// Main → renderer: an agent started a background job and the workbench should
-// surface it as a terminal tab bound to this exact terminal id.
-export const TerminalOpenRequest = Schema.Struct({
-  threadId: TrimmedNonEmptyStringSchema,
-  terminalId: TerminalIdSchema,
-});
-export type TerminalOpenRequest = typeof TerminalOpenRequest.Type;
-
 const TerminalEventBaseSchema = Schema.Struct({
   threadId: Schema.String.check(Schema.isNonEmpty()),
   terminalId: Schema.String.check(Schema.isNonEmpty()),

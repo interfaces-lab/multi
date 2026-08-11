@@ -9,11 +9,12 @@ import type {
   DesktopUpdateState,
 } from "@honk/shared/desktop-api";
 import { Button, StatusDot } from "@honk/ui";
+import { basename } from "@honk/shared/paths";
 import * as React from "react";
 import { useSyncExternalStore } from "react";
 
+import { getInventorySnapshot, subscribeInventory } from "./chat/inventory-store";
 import { actions as toastActions } from "./toast-store";
-import { getSessionInventoryWatchSnapshot, subscribeSessionInventoryWatch } from "./watch-registry";
 
 type UpdateBridgeSurface = {
   readonly getUpdateState: () => Promise<DesktopUpdateState>;
@@ -55,18 +56,26 @@ function publish(partial: Partial<UpdatePillSnapshot>): void {
 
 function readUpdateBridge(): UpdateBridgeSurface | null {
   const bridge = window.desktopBridge;
-  if (bridge === undefined) {
-    return null;
-  }
+  if (bridge === undefined) return null;
+  const getUpdateState = bridge.getUpdateState;
+  const onUpdateState = bridge.onUpdateState;
+  const downloadUpdate = bridge.downloadUpdate;
+  const installUpdate = bridge.installUpdate;
   if (
-    typeof bridge.getUpdateState !== "function" ||
-    typeof bridge.onUpdateState !== "function" ||
-    typeof bridge.downloadUpdate !== "function" ||
-    typeof bridge.installUpdate !== "function"
+    getUpdateState === undefined ||
+    onUpdateState === undefined ||
+    downloadUpdate === undefined ||
+    installUpdate === undefined
   ) {
     return null;
   }
-  return bridge as UpdateBridgeSurface;
+  return {
+    getUpdateState,
+    onUpdateState,
+    downloadUpdate,
+    installUpdate,
+    ...(bridge.checkForUpdate === undefined ? {} : { checkForUpdate: bridge.checkForUpdate }),
+  };
 }
 
 function formatVersion(version: string): string {
@@ -104,7 +113,7 @@ function chipLabel(state: DesktopUpdateState, action: UpdateButtonAction): strin
     state.downloadedVersion ?? state.availableVersion ?? state.currentVersion,
   );
   if (action === "install") {
-    return state.errorContext === "install" && typeof state.message === "string"
+    return state.errorContext === "install" && state.message !== null
       ? `Retry · ${target}`
       : `Restart · ${target}`;
   }
@@ -112,8 +121,7 @@ function chipLabel(state: DesktopUpdateState, action: UpdateButtonAction): strin
     return `Installing · ${target}`;
   }
   if (state.status === "downloading") {
-    const progress =
-      typeof state.downloadPercent === "number" ? ` ${Math.floor(state.downloadPercent)}%` : "";
+    const progress = state.downloadPercent === null ? "" : ` ${Math.floor(state.downloadPercent)}%`;
     return `Downloading${progress}`;
   }
   if (state.status === "error" && state.errorContext === "download") {
@@ -128,7 +136,7 @@ function chipTooltip(state: DesktopUpdateState): string {
   }
   if (state.status === "downloading") {
     const progress =
-      typeof state.downloadPercent === "number" ? ` (${Math.floor(state.downloadPercent)}%)` : "";
+      state.downloadPercent === null ? "" : ` (${Math.floor(state.downloadPercent)}%)`;
     return `Downloading update${progress}`;
   }
   if (state.status === "downloaded") {
@@ -144,14 +152,16 @@ function chipTooltip(state: DesktopUpdateState): string {
 }
 
 function countRunningThreads(): { count: number; titles: readonly string[] } {
-  const { state } = getSessionInventoryWatchSnapshot();
-  if (state === null) {
+  const inventory = getInventorySnapshot();
+  if (inventory.status !== "ready") {
     return { count: 0, titles: [] };
   }
-  const running = state.rootSessions.filter((session) => session.status === "running");
+  const running = inventory.sessions.filter(
+    (session) => session.delegation === undefined && session.phase !== "idle",
+  );
   return {
     count: running.length,
-    titles: running.map((thread) => thread.title),
+    titles: running.map((thread) => thread.title ?? basename(thread.directory)),
   };
 }
 
@@ -225,7 +235,7 @@ export const updatePillActions = {
     if (bridge === null) return;
     await runInstall(bridge, state);
   },
-} as const;
+};
 
 /**
  * Bind the desktop update IPC. Idempotent no-op when the bridge is absent.
@@ -265,7 +275,7 @@ async function runDownload(bridge: UpdateBridgeSurface): Promise<void> {
     });
     return;
   }
-  if (!result.accepted && typeof result.state.message === "string") {
+  if (!result.accepted && result.state.message !== null) {
     toastActions.add({
       type: "error",
       title: "Update download failed",
@@ -282,7 +292,7 @@ async function runInstall(bridge: UpdateBridgeSurface, state: DesktopUpdateState
   }
   const result = await bridge.installUpdate();
   updatePillActions.setState(result.state);
-  if (!result.accepted && typeof result.state.message === "string") {
+  if (!result.accepted && result.state.message !== null) {
     toastActions.add({
       type: "error",
       title: "Update install failed",
@@ -305,11 +315,7 @@ const intrinsicStyles = stylex.create({
 function UpdatePillControl(): React.ReactElement | null {
   const { state, dismissed, bridgePresent } = useUpdatePill();
   // Keep a live subscription so install-confirm sees running threads without an effect.
-  useSyncExternalStore(
-    subscribeSessionInventoryWatch,
-    getSessionInventoryWatchSnapshot,
-    getSessionInventoryWatchSnapshot,
-  );
+  useSyncExternalStore(subscribeInventory, getInventorySnapshot, getInventorySnapshot);
 
   if (!bridgePresent || state === null) {
     return null;

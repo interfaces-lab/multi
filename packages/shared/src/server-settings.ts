@@ -1,5 +1,4 @@
 import { Effect, Result, Schema } from "effect";
-import { deepMerge } from "./Struct";
 import { TrimmedNonEmptyString, TrimmedString } from "./base-schemas";
 import {
   createModelSelection,
@@ -135,7 +134,18 @@ export function applyServerSettingsPatch(
   patch: ServerSettingsPatch,
 ): ServerSettings {
   const selectionPatch = patch.textGenerationModelSelection;
-  const next = deepMerge(current, patch);
+  const next: ServerSettings = {
+    ...current,
+    ...patch,
+    observability: {
+      ...current.observability,
+      ...patch.observability,
+    },
+    textGenerationModelSelection: {
+      ...current.textGenerationModelSelection,
+      ...selectionPatch,
+    },
+  };
   if (!selectionPatch) {
     return next;
   }

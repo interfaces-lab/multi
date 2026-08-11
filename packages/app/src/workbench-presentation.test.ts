@@ -6,13 +6,8 @@ import { fileTabID, type WorkbenchTab } from "./workbench-tab-store";
 function presentation(managedTabs: readonly WorkbenchTab[], activeTabID: string | null) {
   return workbenchPresentation({
     activeTabID,
-    childSessions: [],
     expanded: true,
-    isCreatingSideChat: false,
     managedTabs,
-    planPresent: false,
-    sideChatTabs: [],
-    tasks: [],
   });
 }
 

@@ -50,7 +50,6 @@ import {
   TerminalCloseInput,
   TerminalEvent,
   TerminalOpenInput,
-  TerminalOpenRequest,
   TerminalResizeInput,
   TerminalRestartInput,
   TerminalSessionSnapshot,
@@ -206,134 +205,6 @@ export const DesktopUpdateCheckResultSchema = Schema.Struct({
   state: DesktopUpdateStateSchema,
 });
 
-export type DesktopServerExposureMode =
-  | "local-only"
-  | "network-accessible"
-  | "tailscale"
-  | "tunnel";
-
-export const DesktopServerExposureModeSchema = Schema.Literals([
-  "local-only",
-  "network-accessible",
-  "tailscale",
-  "tunnel",
-]);
-
-export interface DesktopServerExposureState {
-  mode: DesktopServerExposureMode;
-  localUrl: string | null;
-  endpointUrl: string | null;
-  browserUrl: string | null;
-  customUrl: string | null;
-  advertisedHost: string | null;
-}
-
-export interface DesktopServerExposureConfiguration {
-  mode: DesktopServerExposureMode;
-  publicUrl: string | null;
-}
-
-export interface DesktopServerExposureChange {
-  state: DesktopServerExposureState;
-  requiresRelaunch: boolean;
-}
-
-export const DesktopServerExposureStateSchema = Schema.Struct({
-  mode: DesktopServerExposureModeSchema,
-  localUrl: Schema.NullOr(Schema.String),
-  endpointUrl: Schema.NullOr(Schema.String),
-  browserUrl: Schema.NullOr(Schema.String),
-  customUrl: Schema.NullOr(Schema.String),
-  advertisedHost: Schema.NullOr(Schema.String),
-});
-export const DesktopServerExposureConfigurationSchema = Schema.Struct({
-  mode: DesktopServerExposureModeSchema,
-  publicUrl: Schema.NullOr(Schema.String),
-});
-export const DesktopServerExposureChangeSchema = Schema.Struct({
-  state: DesktopServerExposureStateSchema,
-  requiresRelaunch: Schema.Boolean,
-});
-
-export type DesktopRemoteHostStatus = "disabled" | "starting" | "ready" | "error";
-export const DESKTOP_REMOTE_NAME_MAX_LENGTH = 80;
-
-export interface DesktopRemoteHostDevice {
-  id: string;
-  label: string;
-  createdAt: string;
-  revokedAt: string | null;
-}
-
-export interface DesktopRemoteHostState {
-  status: DesktopRemoteHostStatus;
-  name: string;
-  publicUrl: string | null;
-  localUrl: string | null;
-  errorMessage: string | null;
-  // Set when the error is a missing one-time Tailscale Serve approval; opens the
-  // tailnet's per-node enablement page.
-  serveEnableUrl: string | null;
-  devices: readonly DesktopRemoteHostDevice[];
-}
-
-export interface DesktopRemotePairingLink {
-  id: string;
-  url: string | null;
-  mobileUrl: string;
-  expiresAt: string;
-}
-
-export type DesktopRemotePairingState =
-  | { readonly status: "unknown" }
-  | { readonly status: "pending"; readonly expiresAt: string }
-  | { readonly status: "cancelled"; readonly expiresAt: string }
-  | { readonly status: "expired"; readonly expiresAt: string }
-  | {
-      readonly status: "completed";
-      readonly expiresAt: string;
-      readonly device: DesktopRemoteHostDevice;
-    };
-
-export const DesktopRemoteHostStatusSchema = Schema.Literals([
-  "disabled",
-  "starting",
-  "ready",
-  "error",
-]);
-export const DesktopRemoteHostDeviceSchema = Schema.Struct({
-  id: Schema.String,
-  label: Schema.String,
-  createdAt: Schema.String,
-  revokedAt: Schema.NullOr(Schema.String),
-});
-export const DesktopRemoteHostStateSchema = Schema.Struct({
-  status: DesktopRemoteHostStatusSchema,
-  name: Schema.String,
-  publicUrl: Schema.NullOr(Schema.String),
-  localUrl: Schema.NullOr(Schema.String),
-  errorMessage: Schema.NullOr(Schema.String),
-  serveEnableUrl: Schema.NullOr(Schema.String),
-  devices: Schema.Array(DesktopRemoteHostDeviceSchema),
-});
-export const DesktopRemotePairingLinkSchema = Schema.Struct({
-  id: Schema.String,
-  url: Schema.NullOr(Schema.String),
-  mobileUrl: Schema.String,
-  expiresAt: Schema.String,
-});
-export const DesktopRemotePairingStateSchema = Schema.Union([
-  Schema.Struct({ status: Schema.Literal("unknown") }),
-  Schema.Struct({ status: Schema.Literal("pending"), expiresAt: Schema.String }),
-  Schema.Struct({ status: Schema.Literal("cancelled"), expiresAt: Schema.String }),
-  Schema.Struct({ status: Schema.Literal("expired"), expiresAt: Schema.String }),
-  Schema.Struct({
-    status: Schema.Literal("completed"),
-    expiresAt: Schema.String,
-    device: DesktopRemoteHostDeviceSchema,
-  }),
-]);
-
 export interface DesktopWindowChromeState {
   fullscreen: boolean;
 }
@@ -477,34 +348,51 @@ export interface DesktopRendererDiagnosticInput {
   details?: Record<string, unknown>;
 }
 
+export const DesktopTailscaleRemoteAccessStateSchema = Schema.Union([
+  Schema.Struct({ status: Schema.Literal("disabled") }),
+  Schema.Struct({ status: Schema.Literal("enabling") }),
+  Schema.Struct({ status: Schema.Literal("connected"), url: Schema.String }),
+  Schema.Struct({
+    status: Schema.Literal("error"),
+    reason: Schema.Literals(["unavailable", "serve_not_enabled", "failed"]),
+    message: Schema.String,
+    enableUrl: Schema.NullOr(Schema.String),
+  }),
+]);
+export type DesktopTailscaleRemoteAccessState = typeof DesktopTailscaleRemoteAccessStateSchema.Type;
+
+export const DesktopRemotePairingInvitationSchema = Schema.Struct({
+  id: Schema.String,
+  url: Schema.String,
+  expiresAt: Schema.String,
+});
+export type DesktopRemotePairingInvitation = typeof DesktopRemotePairingInvitationSchema.Type;
+
+export const DesktopRemotePairingStateSchema = Schema.Union([
+  Schema.Struct({ status: Schema.Literal("unknown") }),
+  Schema.Struct({ status: Schema.Literal("pending"), expiresAt: Schema.String }),
+  Schema.Struct({ status: Schema.Literal("cancelled"), expiresAt: Schema.String }),
+  Schema.Struct({ status: Schema.Literal("expired"), expiresAt: Schema.String }),
+  Schema.Struct({
+    status: Schema.Literal("completed"),
+    expiresAt: Schema.String,
+    device: Schema.Struct({ id: Schema.String, label: Schema.String }),
+  }),
+]);
+export type DesktopRemotePairingState = typeof DesktopRemotePairingStateSchema.Type;
+
+export const DesktopRemoteDeviceSchema = Schema.Struct({
+  id: Schema.String,
+  label: Schema.String,
+  createdAt: Schema.String,
+});
+export type DesktopRemoteDevice = typeof DesktopRemoteDeviceSchema.Type;
+
 export const DesktopRendererDiagnosticInputSchema = Schema.Struct({
   level: DesktopRendererDiagnosticLevelSchema,
   message: Schema.String,
   details: Schema.optionalKey(Schema.Record(Schema.String, Schema.Unknown)),
 });
-
-/**
- * Local Claude Code CLI credential presence. "unknown" means the probe timed out
- * or errored; callers must not gate on it.
- */
-export type DesktopClaudeAuthStatus = "connected" | "disconnected" | "unknown";
-
-export const DesktopMcpServerInput = Schema.Struct({
-  name: Schema.String,
-  config: Schema.Union([
-    Schema.Struct({
-      type: Schema.Literal("local"),
-      command: Schema.Array(Schema.String),
-      enabled: Schema.optionalKey(Schema.Boolean),
-    }),
-    Schema.Struct({
-      type: Schema.Literal("remote"),
-      url: Schema.String,
-      enabled: Schema.optionalKey(Schema.Boolean),
-    }),
-  ]),
-});
-export type DesktopMcpServerInput = typeof DesktopMcpServerInput.Type;
 
 export interface DesktopBridge<RuntimeApi = unknown> {
   getAppBranding: () => DesktopAppBranding | null;
@@ -516,28 +404,12 @@ export interface DesktopBridge<RuntimeApi = unknown> {
   destroyBrowserView: (input: DesktopBrowserViewDestroyInput) => Promise<void>;
   onBrowserViewState: (listener: (state: DesktopBrowserViewState) => void) => () => void;
   onBrowserAutomationOpen: (listener: (input: BrowserAutomationOpenRequest) => void) => () => void;
-  onTerminalOpen: (listener: (input: TerminalOpenRequest) => void) => () => void;
   pty?: DesktopPtyBridge;
   getWindowChromeState: () => DesktopWindowChromeState;
   onWindowChromeState: (listener: (state: DesktopWindowChromeState) => void) => () => void;
   setActiveWorkState: (state: DesktopActiveWorkState) => Promise<void>;
   getClientSettings: () => Promise<ClientSettings | null>;
   setClientSettings: (settings: ClientSettings) => Promise<void>;
-  persistMcpServer?: (input: DesktopMcpServerInput) => Promise<void>;
-  protectRemoteCredential?: (credential: string) => Promise<string>;
-  revealRemoteCredential?: (protectedCredential: string) => Promise<string>;
-  getServerExposureState: () => Promise<DesktopServerExposureState>;
-  configureServerExposure: (
-    input: DesktopServerExposureConfiguration,
-  ) => Promise<DesktopServerExposureChange>;
-  getRemoteHostState: () => Promise<DesktopRemoteHostState>;
-  restartRemoteHost: () => Promise<void>;
-  issueRemotePairing: () => Promise<DesktopRemotePairingLink>;
-  getRemotePairingState: (pairingID: string) => Promise<DesktopRemotePairingState>;
-  cancelRemotePairing: (pairingID: string) => Promise<boolean>;
-  setRemoteHostName: (name: string) => Promise<DesktopRemoteHostState>;
-  renameRemoteDevice: (deviceID: string, label: string) => Promise<DesktopRemoteHostState>;
-  revokeRemoteDevice: (deviceID: string) => Promise<DesktopRemoteHostState>;
   pickFolder: (options?: PickFolderOptions) => Promise<string | null>;
   /** The OS home directory. Setup's "Use defaults" writes it as the default project folder. */
   getHomeDirectory: () => Promise<string>;
@@ -547,7 +419,6 @@ export interface DesktopBridge<RuntimeApi = unknown> {
   setBackgroundColor: (color: string) => Promise<void>;
   setVibrancy: (enabled: boolean) => Promise<void>;
   setKeepAwake?: (enabled: boolean) => Promise<boolean>;
-  getClaudeAuthStatus?: () => Promise<DesktopClaudeAuthStatus>;
   expandWindowWidth?: (additionalWidth: number) => Promise<void>;
   showContextMenu: <T extends string>(
     items: readonly ContextMenuItem<T>[],

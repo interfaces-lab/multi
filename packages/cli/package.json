@@ -1,34 +1,32 @@
 {
   "name": "@honk/cli",
-  "version": "0.6.2",
-  "description": "Run Honk and its managed OpenCode host.",
+  "version": "0.7.0",
+  "description": "Run Honk Core and connect through Tailscale.",
   "license": "MIT",
   "bin": {
-    "honk": "./dist/bin.js"
+    "honk": "./dist/bin.mjs"
   },
   "files": [
-    "dist",
-    "web"
+    "dist"
   ],
   "type": "module",
-  "exports": {
-    "./host": "./src/host.ts",
-    "./state": "./src/state.ts"
-  },
   "scripts": {
     "dev": "bun src/bin.ts",
-    "build": "tsdown src/bin.ts --format esm --out-dir dist --clean && node scripts/copy-web.mjs",
+    "build": "tsdown src/bin.ts --format esm --out-dir dist --clean",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "open": "^11.0.0",
-    "opencode-ai": "1.18.10",
-    "toqr": "0.1.1"
+    "@earendil-works/pi-agent-core": "0.83.0",
+    "@earendil-works/pi-ai": "0.83.0",
+    "@effect/platform-node": "catalog:",
+    "@modelcontextprotocol/sdk": "^1.25.2",
+    "effect": "catalog:",
+    "toqr": "0.1.1",
+    "typebox": "1.3.7"
   },
   "devDependencies": {
-    "@honk/app": "workspace:*",
-    "@honk/opencode": "workspace:*",
+    "@honk/core": "workspace:*",
     "@types/node": "catalog:",
     "tsdown": "catalog:",
     "typescript": "catalog:",

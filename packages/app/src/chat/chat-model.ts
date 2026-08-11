@@ -2,15 +2,31 @@
 // strict tests need no DOM and no network: the controller only feeds events in
 // and renders state out.
 //
-// The thread projection is native: Pi entries in, view rows out. No opencode
+// The thread projection is native: Pi entries in, view rows out. No retired backend
 // shapes, no fabricated authors — a Pi value the transcript cannot express
 // honestly becomes a notice row, not an invented message. Git receipts come
 // from `session.changes` and attach to the turn that earned them.
 
 import type { Git } from "@honk/core";
 import { Tools } from "@honk/core";
-import type { Session } from "@honk/core/session";
+import { Session } from "@honk/core/session";
 import type { ConversationDensity } from "@honk/shared/conversation-density";
+import { Option, Schema } from "effect";
+
+import type { ModelChoice } from "./chat-controller";
+import type { ComposerMessage } from "./composer-store";
+import {
+  editPatchOf,
+  measurePatch,
+  taskChildIdOf,
+  taskRoleOf,
+  toolBody,
+  toolDetail,
+  toolVerb,
+  writeContentOf,
+  type StepState,
+} from "./tool-presentation";
+import { decodeThinkingLevel, type ModelSelection } from "./selection";
 
 export type ChatStatus = "connecting" | "ready" | "running" | "disconnected" | "failed";
 type MessageUpdateEvent = Extract<Session.AgentHarnessEvent, { readonly type: "message_update" }>;
@@ -19,15 +35,43 @@ export type StreamingAssistantMessage = Extract<
   { readonly role: "assistant" }
 >;
 
+/**
+ * The harness's queue, replayed as Pi truth: every `queue_update` frame
+ * carries the whole queue, so a frame replaces this value wholesale and
+ * settlement empties it. No client-side ids — a row is its bucket and index.
+ */
+export interface QueueSnapshot {
+  readonly steer: readonly ComposerMessage[];
+  readonly followUp: readonly ComposerMessage[];
+  readonly nextTurn: readonly ComposerMessage[];
+}
+
+export const EMPTY_QUEUE: QueueSnapshot = Object.freeze({
+  steer: [],
+  followUp: [],
+  nextTurn: [],
+});
+
 export interface ChatState {
   readonly status: ChatStatus;
   readonly sessionId: Session.SessionId | null;
   readonly entries: readonly Session.SessionTreeEntry[];
+  // What Pi holds for later delivery right now; the tray renders this.
+  readonly queue: QueueSnapshot;
   // Per-turn git change receipts, from the watch's authoritative state.
   readonly turns: Session.ChangesOutput["turns"];
   // Pi's live assistant message while a run streams. Authoritative entries
   // arrive in state frames.
   readonly streamingMessage: StreamingAssistantMessage | null;
+  // Pi's thinking level: the last `thinking_level_change` record wins.
+  // Null means no valid record yet — Pi's own default (`off`) applies.
+  readonly thinkingLevel: Session.ThinkingLevel | null;
+  // The model, the same way: the last `model_change` record wins. Null means no usable
+  // record yet — core's default policy decides what the session runs on.
+  readonly model: ModelChoice | null;
+  // The fusion stop, from the last `honk.fusion` marker. Null reads the same
+  // for "never fusion" and "exited" — either way the seats are single-model.
+  readonly fusionStop: Session.FusionStop | null;
   readonly error: string | null;
 }
 
@@ -39,10 +83,9 @@ export type ChatEvent =
   | {
       readonly type: "state";
       readonly entries: readonly Session.SessionTreeEntry[];
-      readonly status: Session.RunStatus;
+      readonly phase: Session.Phase;
       readonly turns: Session.ChangesOutput["turns"];
     }
-  | { readonly type: "prompted" }
   | { readonly type: "stream_ended" }
   | { readonly type: "failed"; readonly message: string };
 
@@ -50,25 +93,129 @@ export const initialState: ChatState = {
   status: "connecting",
   sessionId: null,
   entries: [],
+  queue: EMPTY_QUEUE,
   turns: [],
   streamingMessage: null,
+  thinkingLevel: null,
+  model: null,
+  fusionStop: null,
   error: null,
 };
 
-interface TextBlocksMessage {
-  readonly content: string | readonly { readonly type: string; readonly text?: string }[];
-}
+/** The stop ladder, in effort order — the picker renders these. */
+export const FUSION_STOPS: readonly Session.FusionStop[] = Session.FusionStop.literals;
 
-const textOfMessage = (message: TextBlocksMessage): string =>
-  typeof message.content === "string"
-    ? message.content
-    : message.content
-        .filter(
-          (part): part is { type: "text"; text: string } =>
-            part.type === "text" && typeof part.text === "string",
-        )
-        .map((part) => part.text)
-        .join("\n");
+const FusionMarker = Schema.Struct({ stop: Schema.NullOr(Session.FusionStop) });
+const decodeFusionMarker = Schema.decodeUnknownOption(FusionMarker);
+
+// The marker's stop is validated like every stored string: an unknown value
+// reads as exited rather than a guess.
+const fusionStopOf = (entries: readonly Session.SessionTreeEntry[]): Session.FusionStop | null => {
+  for (let index = entries.length - 1; index >= 0; index -= 1) {
+    const entry = entries[index];
+    if (entry?.type === "custom" && entry.customType === "honk.fusion") {
+      return Option.getOrNull(Option.map(decodeFusionMarker(entry.data), (marker) => marker.stop));
+    }
+  }
+  return null;
+};
+
+/** Pi's thinking vocabulary in effort order — the composer renders these. */
+export const THINKING_LEVELS: readonly Session.ThinkingLevel[] = Session.ThinkingLevel.literals;
+
+// Pi stores the entry value as a plain string, so the record is validated
+// against the known vocabulary. A level this build does not know — a newer
+// Pi's, say — yields null rather than a guess, and the default reads through.
+const thinkingLevelOf = (
+  entries: readonly Session.SessionTreeEntry[],
+): Session.ThinkingLevel | null => {
+  for (let index = entries.length - 1; index >= 0; index -= 1) {
+    const entry = entries[index];
+    if (entry?.type === "thinking_level_change") return decodeThinkingLevel(entry.thinkingLevel);
+  }
+  return null;
+};
+
+// The model reads the same way: the last `model_change` record wins, and
+// a record that names no model reads as none rather than a guess — the
+// resolved default is then what the session runs on.
+const decodeModelChange = Schema.decodeUnknownOption(
+  Schema.Struct({ provider: Schema.NonEmptyString, modelId: Schema.NonEmptyString }),
+);
+
+const modelOf = (entries: readonly Session.SessionTreeEntry[]): ModelChoice | null => {
+  for (let index = entries.length - 1; index >= 0; index -= 1) {
+    const entry = entries[index];
+    if (entry?.type === "model_change") {
+      return Option.getOrNull(
+        Option.map(decodeModelChange(entry), (change) => ({
+          providerId: change.provider,
+          modelId: change.modelId,
+        })),
+      );
+    }
+  }
+  return null;
+};
+
+/** The model intent inherited by a branch ending at these entries. */
+export const modelSelectionOfEntries = (
+  entries: readonly Session.SessionTreeEntry[],
+): ModelSelection => {
+  const fusionStop = fusionStopOf(entries);
+  return fusionStop === null
+    ? {
+        kind: "model",
+        model: modelOf(entries),
+        thinkingLevel: thinkingLevelOf(entries),
+      }
+    : { kind: "fusion", stop: fusionStop };
+};
+
+type PiEntryMessage = Extract<Session.SessionTreeEntry, { readonly type: "message" }>["message"];
+type PiUserMessage = Extract<PiEntryMessage, { readonly role: "user" }>;
+
+const composerMessageOf = (message: PiUserMessage): ComposerMessage =>
+  message.content instanceof Array
+    ? {
+        text: message.content
+          .flatMap((part) => (part.type === "text" ? [part.text] : []))
+          .join("\n"),
+        images: message.content.flatMap((part) =>
+          part.type === "image" ? [{ data: part.data, mimeType: part.mimeType }] : [],
+        ),
+      }
+    : { text: message.content, images: [] };
+
+/**
+ * The user's words from an abort's cleared queues (spec/conversation.md
+ * section 7: stopping must never destroy something the user typed). The
+ * composer puts this back in the editor.
+ */
+export const clearedMessageOf = (cleared: Session.AbortOutput): ComposerMessage => {
+  const messages = [...cleared.clearedSteer, ...cleared.clearedFollowUp]
+    .filter((message) => "role" in message && message.role === "user")
+    .map(composerMessageOf);
+  return {
+    text: messages
+      .map((message) => message.text)
+      .filter((text) => text.length > 0)
+      .join("\n\n"),
+    images: messages.flatMap((message) => message.images),
+  };
+};
+
+type QueueUpdate = Extract<Session.AgentHarnessEvent, { readonly type: "queue_update" }>;
+
+// One queue projection for the same message shape the composer owns. A queued
+// image is still visible before delivery; non-user harness traffic is not a
+// message the user queued.
+const queueMessagesOf = (messages: QueueUpdate["steer"]): readonly ComposerMessage[] =>
+  messages.flatMap((message) => {
+    if (!("role" in message) || message.role !== "user") return [];
+    const queued = composerMessageOf(message);
+    return queued.text.length === 0 && queued.images.length === 0 ? [] : [queued];
+  });
 
 export const reduce = (state: ChatState, event: ChatEvent): ChatState => {
   switch (event.type) {
@@ -83,24 +230,54 @@ export const reduce = (state: ChatState, event: ChatEvent): ChatState => {
           if (piEvent.message.role !== "assistant") return state;
           return { ...state, streamingMessage: piEvent.message };
         case "message_end":
+          // Keep the exact final assistant value through the repair read that
+          // follows this event. The committed entry and this live value fold
+          // together without duplication; clearing here would remove the
+          // work for one frame before that authoritative entry arrives.
           return piEvent.message.role === "assistant"
-            ? { ...state, streamingMessage: null }
+            ? { ...state, streamingMessage: piEvent.message }
             : state;
+        // Settlement is what drains the queue: the frames described a run
+        // that no longer exists, so the tray empties with it.
         case "settled":
-          return { ...state, status: "ready", streamingMessage: null };
+          return { ...state, status: "ready", streamingMessage: null, queue: EMPTY_QUEUE };
+        // Pi announces the whole queue on every change; each frame replaces
+        // the last, and nothing here ever merges or invents an id.
+        case "queue_update":
+          return {
+            ...state,
+            queue: {
+              steer: queueMessagesOf(piEvent.steer),
+              followUp: queueMessagesOf(piEvent.followUp),
+              nextTurn: queueMessagesOf(piEvent.nextTurn),
+            },
+          };
+        // The live move: Pi buffers the transcript record until settle, so
+        // this event is what a mid-run change looks like before it commits.
+        case "thinking_level_update":
+          return { ...state, thinkingLevel: piEvent.level };
+        // Pi names a model by provider and id; the app carries the same pair.
+        case "model_update": {
+          return {
+            ...state,
+            model: { providerId: piEvent.model.provider, modelId: piEvent.model.id },
+          };
+        }
         default:
           return state;
       }
     }
-    case "prompted":
-      return { ...state, status: "running" };
     case "state":
       return {
         ...state,
         entries: event.entries,
         turns: event.turns,
-        // The authoritative read wins over local guesses about the run.
-        status: event.status === "running" ? "running" : "ready",
+        thinkingLevel: thinkingLevelOf(event.entries),
+        model: modelOf(event.entries),
+        fusionStop: fusionStopOf(event.entries),
+        // The authoritative read wins over local guesses about the run. Any
+        // phase but idle means the harness is working (Pi's vocabulary).
+        status: event.phase === "idle" ? "ready" : "running",
       };
     case "stream_ended":
       return { ...state, status: "disconnected" };
@@ -113,22 +290,13 @@ export const reduce = (state: ChatState, event: ChatEvent): ChatState => {
 // Thread projection
 // ---------------------------------------------------------------------------
 
-type PiMessage = Extract<Session.SessionTreeEntry, { readonly type: "message" }>["message"];
-type PiToolResult = Extract<PiMessage, { readonly role: "toolResult" }>;
+type PiToolResult = Extract<PiEntryMessage, { readonly role: "toolResult" }>;
 
 const toolResultText = (result: PiToolResult): string =>
   result.content
     .flatMap((block) => (block.type === "text" ? [block.text] : []))
     .join("\n")
     .trim();
-
-const formatArgs = (args: unknown): string => {
-  try {
-    return JSON.stringify(args, null, 2) ?? "";
-  } catch {
-    return String(args);
-  }
-};
 
 const noticeOf = (entry: Session.SessionTreeEntry): string | null => {
   switch (entry.type) {
@@ -138,7 +306,11 @@ const noticeOf = (entry: Session.SessionTreeEntry): string | null => {
       return `Thinking level: ${entry.thinkingLevel}`;
     case "custom":
       if (entry.customType === "honk.workspace_change") {
-        const directory = (entry.data as { directory?: string } | undefined)?.directory;
+        const directory = Option.getOrUndefined(
+          Schema.decodeUnknownOption(
+            Schema.Struct({ directory: Schema.optionalKey(Schema.String) }),
+          )(entry.data),
+        )?.directory;
         return directory === undefined ? "Moved to another workspace" : `Moved to ${directory}`;
       }
       if (entry.customType === "honk.revert") return "Workspace reverted to an earlier turn";
@@ -162,19 +334,31 @@ const noticeOf = (entry: Session.SessionTreeEntry): string | null => {
  * gate uses — so there is exactly one list. Unknown tools classify opaque and
  * therefore never group: erring toward visible.
  */
-const isReadShaped = (name: string, args: unknown): boolean =>
+const readShaped = (name: string, args: unknown): boolean =>
   Tools.writesOf(name, args).kind === "none";
 
 export interface TurnStep {
   /** Pi's tool call id: stable across streaming and commit. */
   readonly key: string;
   readonly name: string;
-  readonly args: string;
-  /** The most human string in the arguments — a path or a command. */
+  /** The tensed verb this call reads as right now (`tool-presentation`). */
+  readonly verb: string;
+  /** The one human argument — a path, a command, a query, a mission. */
   readonly detail: string | null;
-  readonly state: "running" | "ok" | "error";
+  readonly state: StepState;
+  /** The clipped result text; empty when the row's card owns the content. */
   readonly output: string;
+  /** Pi's unified patch, from an edit result's `details`. */
+  readonly patch: string | null;
+  /** A write's new file text, straight from its own arguments. */
+  readonly content: string | null;
+  readonly added: number;
+  readonly removed: number;
   readonly readShaped: boolean;
+  /** A task call's `subagent_type`; null for every other tool. */
+  readonly taskRole: string | null;
+  /** The child session a settled task ran in, from the result's `details`. */
+  readonly taskChildId: string | null;
 }
 
 export interface TurnSegment {
@@ -188,6 +372,7 @@ export interface TurnView {
   /** The user entry id: the turn's identity for overrides and receipts. */
   readonly id: string;
   readonly userText: string;
+  readonly userImages: readonly Session.PromptImage[];
   readonly segments: readonly TurnSegment[];
   /** The turn's final text block; survives collapse to L0. */
   readonly summary: string | null;
@@ -203,12 +388,37 @@ export interface TurnView {
   readonly error: string | null;
 }
 
-/** The most human string in a tool's arguments, shared by rows and the ticker. */
-export const stepDetail = (args: unknown): string | null => {
-  if (typeof args !== "object" || args === null) return null;
-  const record = args as Record<string, unknown>;
-  const candidate = record.path ?? record.file ?? record.command;
-  return typeof candidate === "string" && candidate.length > 0 ? candidate : null;
+type PiToolCall = Extract<
+  StreamingAssistantMessage["content"][number],
+  { readonly type: "toolCall" }
+>;
+
+/**
+ * One tool call as a row: the presentation table names it, Pi's result says
+ * how it ended, and an edit's `details` patch is what the diff card renders.
+ * A write carries its own new text; nothing here counts a write's lines,
+ * because the call never saw the file it replaced.
+ */
+const turnStep = (block: PiToolCall, result: PiToolResult | undefined): TurnStep => {
+  const state: StepState = result === undefined ? "running" : result.isError ? "error" : "ok";
+  const patch = result === undefined ? null : editPatchOf(result.details);
+  const stats = patch === null ? { added: 0, removed: 0 } : measurePatch(patch);
+  return {
+    key: block.id,
+    name: block.name,
+    verb: toolVerb(block.name, block.arguments, state),
+    detail: toolDetail(block.name, block.arguments),
+    state,
+    output: result === undefined ? "" : toolBody(block.name, state, toolResultText(result)),
+    patch,
+    content: block.name === "write" ? writeContentOf(block.arguments) : null,
+    added: stats.added,
+    removed: stats.removed,
+    readShaped: readShaped(block.name, block.arguments),
+    taskRole: block.name === "task" ? taskRoleOf(block.arguments) : null,
+    taskChildId:
+      block.name === "task" && result !== undefined ? taskChildIdOf(result.details) : null,
+  };
 };
 
 /**
@@ -238,6 +448,7 @@ export const turnViews = (
   let turn: {
     id: string;
     userText: string;
+    userImages: readonly Session.PromptImage[];
     segments: TurnSegment[];
     startedAt: string;
     lastAt: string;
@@ -245,13 +456,27 @@ export const turnViews = (
     files: readonly Git.FileChange[];
     error: string | null;
   } | null = null;
-  let segment: { id: string; headline: string | null; steps: TurnStep[] } | null = null;
+  let segment: { ordinal: number; headline: string | null; steps: TurnStep[] } | null = null;
   // Assistant text is pending until the next block decides what it was: a
   // tool call makes it a headline, the end of the turn makes it the summary.
   let pendingText: string | null = null;
+  // What this turn has already folded. Pi's state frame can land the committed
+  // assistant entry before `message_end` retires the live message, and folding
+  // both would render the same work twice. A tool call id is Pi's identity for
+  // a block; a text block is its own words.
+  const foldedCalls = new Set<string>();
+  const foldedTexts = new Set<string>();
 
   const closeSegment = () => {
-    if (segment !== null && turn !== null) turn.segments.push(segment);
+    if (segment !== null && turn !== null) {
+      // The segment's identity is its first call, so disclosure survives the
+      // live-to-commit seam; the ordinal only covers a segment with no call.
+      turn.segments.push({
+        id: segment.steps[0]?.key ?? `segment:${String(segment.ordinal)}`,
+        headline: segment.headline,
+        steps: segment.steps,
+      });
+    }
     segment = null;
   };
   const closeTurn = () => {
@@ -262,6 +487,7 @@ export const turnViews = (
       turns.push({
         id: turn.id,
         userText: turn.userText,
+        userImages: turn.userImages,
         segments: turn.segments,
         summary: pendingText,
         startedAt: turn.startedAt,
@@ -276,39 +502,36 @@ export const turnViews = (
     }
     turn = null;
     pendingText = null;
+    // The seam is a within-turn concern; an answer repeated in a later turn
+    // is a different answer.
+    foldedCalls.clear();
+    foldedTexts.clear();
   };
 
-  // One block walk shared by committed messages and the streaming one. The
-  // sourceId keys segments; the running count keeps sibling segment ids apart.
+  // One block walk shared by committed messages and the streaming one.
+  // `skipFolded` is the commit seam: the live message replays blocks the
+  // committed entry already contributed, and those are dropped rather than
+  // rendered a second time.
   const foldAssistantBlocks = (
     blocks: StreamingAssistantMessage["content"],
-    sourceId: string,
+    skipFolded: boolean,
   ) => {
     if (turn === null) return;
     for (const block of blocks) {
       if (block.type === "text") {
+        if (skipFolded && foldedTexts.has(block.text)) continue;
+        foldedTexts.add(block.text);
         closeSegment();
         pendingText = pendingText === null ? block.text : `${pendingText}\n\n${block.text}`;
       } else if (block.type === "toolCall") {
+        if (skipFolded && foldedCalls.has(block.id)) continue;
+        foldedCalls.add(block.id);
         if (pendingText !== null || segment === null) {
           closeSegment();
-          segment = {
-            id: `${sourceId}:${String(turn.segments.length)}`,
-            headline: pendingText,
-            steps: [],
-          };
+          segment = { ordinal: turn.segments.length, headline: pendingText, steps: [] };
           pendingText = null;
         }
-        const result = toolResults.get(block.id);
-        segment.steps.push({
-          key: block.id,
-          name: block.name,
-          args: formatArgs(block.arguments),
-          detail: stepDetail(block.arguments),
-          state: result === undefined ? "running" : result.isError ? "error" : "ok",
-          output: result === undefined ? "" : toolResultText(result),
-          readShaped: isReadShaped(block.name, block.arguments),
-        });
+        segment.steps.push(turnStep(block, toolResults.get(block.id)));
       }
       // thinking blocks are L3 detail; the grammar skips them.
     }
@@ -324,9 +547,11 @@ export const turnViews = (
 
     if (message.role === "user") {
       closeTurn();
+      const user = composerMessageOf(message);
       turn = {
         id: entry.id,
-        userText: textOfMessage(message),
+        userText: user.text,
+        userImages: user.images,
         segments: [],
         startedAt: entry.timestamp,
         lastAt: entry.timestamp,
@@ -355,11 +580,11 @@ export const turnViews = (
       turn.error = null;
     }
 
-    foldAssistantBlocks(message.content, entry.id);
+    foldAssistantBlocks(message.content, false);
   }
 
   if (streamingMessage !== null && turn !== null) {
-    foldAssistantBlocks(streamingMessage.content, `live:${String(streamingMessage.timestamp)}`);
+    foldAssistantBlocks(streamingMessage.content, true);
   }
 
   closeTurn();
@@ -435,40 +660,69 @@ export const effectiveLayer = (
 
 export type TickerState =
   | { readonly kind: "idle" }
-  | { readonly kind: "planning" }
+  /** `since` is when the wait began: the last result to land, or nothing. */
+  | { readonly kind: "planning"; readonly since: number | null }
   | { readonly kind: "writing" }
-  | { readonly kind: "step"; readonly name: string; readonly detail: string | null }
+  | { readonly kind: "step"; readonly verb: string; readonly detail: string | null }
   | { readonly kind: "rollup"; readonly count: number };
 
 /** Minimum consecutive read-shaped calls before work rolls up (spec §4). */
 export const GROUP_MIN = 2;
+
+/** When the newest tool result landed — the epoch a wait is measured from. */
+const lastResultAt = (entries: readonly Session.SessionTreeEntry[]): number | null => {
+  for (let index = entries.length - 1; index >= 0; index -= 1) {
+    const entry = entries[index];
+    if (entry?.type === "message" && entry.message.role === "toolResult") {
+      const at = Date.parse(entry.timestamp);
+      return Number.isFinite(at) ? at : null;
+    }
+  }
+  return null;
+};
 
 /**
  * Derives the live label from the streaming message's newest block. Before
  * any block streams — and while thinking streams — the agent is planning; a
  * streaming text block means prose is being written, which the surface
  * streams outside the window as ordinary markdown while the window holds its
- * last label (spec §5); a tool call names itself.
+ * last label (spec §5); a running tool names itself.
+ *
+ * A trailing call whose result has already landed is no longer work in
+ * flight: the window stops shimmering it and reads as planning again, which
+ * is what stamps the ✓ on the label that just finished (spec §6).
  */
 export const tickerOf = (state: ChatState): TickerState => {
   if (state.status !== "running") return { kind: "idle" };
+  const planning: TickerState = { kind: "planning", since: lastResultAt(state.entries) };
   const content = state.streamingMessage?.content ?? [];
   const last = content.at(-1);
-  if (last === undefined) return { kind: "planning" };
+  if (last === undefined) return planning;
   if (last.type === "toolCall") {
+    const finished = new Set<string>();
+    for (const entry of state.entries) {
+      if (entry.type === "message" && entry.message.role === "toolResult") {
+        finished.add(entry.message.toolCallId);
+      }
+    }
+    if (finished.has(last.id)) return planning;
     // The trailing run of read-shaped calls rolls up once it crosses the
     // group minimum (spec §6) — a text block or a writing tool breaks it.
     let reads = 0;
     for (let index = content.length - 1; index >= 0; index -= 1) {
       const block = content[index];
-      if (block?.type !== "toolCall" || !isReadShaped(block.name, block.arguments)) break;
+      if (block?.type !== "toolCall" || !readShaped(block.name, block.arguments)) break;
       reads += 1;
     }
     if (reads >= GROUP_MIN) return { kind: "rollup", count: reads };
-    return { kind: "step", name: last.name, detail: stepDetail(last.arguments) };
+    return {
+      kind: "step",
+      verb: toolVerb(last.name, last.arguments, "running"),
+      detail: toolDetail(last.name, last.arguments),
+    };
   }
   if (last.type === "text") return { kind: "writing" };
-  return { kind: "planning" };
+  return planning;
 };
 
 /**
@@ -499,8 +753,12 @@ export type ConversationItem =
 
 const gitActionOf = (entry: Session.SessionTreeEntry): string | null => {
   if (entry.type !== "custom" || entry.customType !== "honk.git_action") return null;
-  const action = (entry.data as { action?: unknown } | undefined)?.action;
-  return typeof action === "string" ? action : null;
+  return Option.getOrNull(
+    Option.map(
+      Schema.decodeUnknownOption(Schema.Struct({ action: Schema.String }))(entry.data),
+      (marker) => marker.action,
+    ),
+  );
 };
 
 export const conversationItems = (
@@ -514,6 +772,11 @@ export const conversationItems = (
 
   const items: ConversationItem[] = [];
   let pendingAction: { readonly id: string; readonly action: string } | null = null;
+  // Records before the first turn are the session's birth configuration, not
+  // events in a conversation: create writes the model and thinking level
+  // durably, and announcing initial state as a change would be noise. Only
+  // changes after talk starts earn a notice row.
+  let conversationStarted = false;
   const flushUnstartedAction = () => {
     if (pendingAction !== null) {
       items.push({ kind: "git_action_failed", id: pendingAction.id, action: pendingAction.action });
@@ -528,7 +791,14 @@ export const conversationItems = (
       if (turn !== undefined) {
         items.push({ kind: "turn", turn, gitAction: pendingAction?.action ?? null });
         pendingAction = null;
+        conversationStarted = true;
       }
+      continue;
+    }
+    if (
+      !conversationStarted &&
+      (entry.type === "model_change" || entry.type === "thinking_level_change")
+    ) {
       continue;
     }
     const action = gitActionOf(entry);

@@ -1,30 +1,24 @@
-import {
-  openCodeSessionKey,
-  type OpenCodeClient,
-  type OpenCodeServerKey,
-  type OpenCodeSessionRef,
-  type OpenCodeVcsFileDiff,
-  type OpenCodeVcsFileStatus,
-} from "@honk/opencode";
+import type { Git, HonkClient } from "@honk/core";
 import * as React from "react";
 
+import { getHonkClient } from "./chat/client";
 import { errorMessage } from "./error-message";
-import { getOpenCodeClient } from "./watch-registry";
+import type { WorkbenchSessionRef } from "./workbench-frame";
 
 const CHANGES_RESOURCE_GRACE_MS = 30_000;
 
-// The three comparisons OpenCode V2 can actually answer: `vcs.diff` mode "git"
-// (working tree vs HEAD), mode "branch" (merge-base of the default branch vs the
-// working tree), and the session's newest user turn via `sessions.lastTurnDiff`.
-// Cursor's staged/unstaged/per-commit scopes have no route here and are omitted.
+// The three comparisons Honk Core can answer: `git.status`/`git.diff` mode
+// "git" (working tree vs HEAD), mode "branch" (merge-base of the default
+// branch vs the working tree), and the session's newest settled turn via
+// `session.changes` + `git.checkpointDiff` over the turn's checkpoints.
 type ChangesScope = "git" | "branch" | "lastTurn";
 
 type ChangesReady = {
   readonly branch: string | null;
   readonly defaultBranch: string | null;
-  readonly files: readonly OpenCodeVcsFileStatus[];
-  readonly diffs: ReadonlyMap<string, OpenCodeVcsFileDiff>;
-  // The file list paints from info+status immediately; patches stream in after. While true,
+  readonly files: readonly Git.FileChange[];
+  readonly diffs: ReadonlyMap<string, Git.FileDiff>;
+  // The file list paints from status immediately; patches stream in after. While true,
   // an absent patch means "still loading" rather than "binary/oversized".
   readonly diffsPending: boolean;
 };
@@ -41,25 +35,23 @@ type ChangesResource = {
   readonly observeThreadRunning: (isRunning: boolean) => void;
 };
 
-type ChangesClient = Pick<OpenCodeClient, "vcs"> & {
-  readonly sessions: Pick<OpenCodeClient["sessions"], "lastTurnDiff">;
+type ChangesClient = {
+  readonly git: Pick<HonkClient["git"], "status" | "diff" | "checkpointDiff">;
+  readonly session: Pick<HonkClient["session"], "changes">;
 };
-type ChangesClientResolver = (server: OpenCodeServerKey) => ChangesClient | null;
+type ChangesClientResolver = () => ChangesClient | null;
 
 const changesResources = new Map<string, ChangesResource>();
 const INITIAL_CHANGES_SNAPSHOT: ChangesSnapshot = Object.freeze({ phase: "loading" });
 
-function indexDiffs(
-  diffs: readonly OpenCodeVcsFileDiff[],
-): ReadonlyMap<string, OpenCodeVcsFileDiff> {
+function indexDiffs(diffs: readonly Git.FileDiff[]): ReadonlyMap<string, Git.FileDiff> {
   return new Map(diffs.map((diff) => [diff.file, Object.freeze(diff)]));
 }
 
 function createChangesResource(
-  sessionRef: OpenCodeSessionRef,
-  directory: string,
+  sessionRef: WorkbenchSessionRef,
   scope: ChangesScope,
-  resolveClient: ChangesClientResolver = getOpenCodeClient,
+  resolveClient: ChangesClientResolver = getHonkClient,
 ): ChangesResource {
   let snapshot = INITIAL_CHANGES_SNAPSHOT;
   let requested = false;
@@ -69,7 +61,8 @@ function createChangesResource(
   let lastThreadRunning: boolean | undefined;
   let releaseTimer: ReturnType<typeof setTimeout> | null = null;
   const listeners = new Set<() => void>();
-  const key = changesResourceKey(sessionRef, directory, scope);
+  const key = changesResourceKey(sessionRef, scope);
+  const { sessionId, workspaceId } = sessionRef;
 
   const publish = (next: ChangesSnapshot): void => {
     snapshot = Object.freeze(next);
@@ -77,52 +70,64 @@ function createChangesResource(
   };
 
   const load = async (client: ChangesClient, current: number): Promise<void> => {
-    const info = await client.vcs.info({ directory });
+    // Every scope answers status first: the branch chip needs `branch` and
+    // `defaultBranch` regardless of which comparison the cards show, and the
+    // working-tree/branch scopes get their early file list from the same call.
+    const status =
+      scope === "branch"
+        ? await client.git.status({ workspaceId, mode: "branch" })
+        : await client.git.status({ workspaceId });
     if (sequence !== current) return;
-    const branch = info.branch ?? null;
-    const defaultBranch = info.default_branch ?? null;
+    const branch = status.branch;
+    const defaultBranch = status.defaultBranch;
 
-    if (scope === "git") {
-      // The working tree is the one scope with a status route, so its file list can
-      // paint before the heavy per-file `diff` call returns every patch.
-      const files = await client.vcs.status({ directory });
-      if (sequence !== current) return;
+    if (scope === "git" || scope === "branch") {
       publish({
         phase: "ready",
         branch,
         defaultBranch,
-        files: Object.freeze([...files]),
+        files: Object.freeze([...status.files]),
         diffs: new Map(),
         diffsPending: true,
       });
-      const diffs = await client.vcs.diff({ directory, mode: "git" });
+      const diffs = await client.git.diff({ workspaceId, mode: scope });
       if (sequence !== current || snapshot.phase !== "ready") return;
       publish({ ...snapshot, diffs: indexDiffs(diffs), diffsPending: false });
       return;
     }
 
-    // Every other scope has no status equivalent: its file list is whatever the diff
-    // reported, so there is nothing to paint early.
-    const diffs =
-      scope === "branch"
-        ? await client.vcs.diff({ directory, mode: "branch" })
-        : await client.sessions.lastTurnDiff(sessionRef);
+    // Last turn: the session's change receipt names the turn and its files;
+    // the patches are the diff between that turn's checkpoint and the one
+    // before it (`<sessionId>/<entryId>`, with "base" before the first turn).
+    const { turns } = await client.session.changes({ sessionId });
     if (sequence !== current) return;
+    const lastTurn = turns.at(-1);
+    if (lastTurn === undefined || lastTurn.files.length === 0) {
+      publish({
+        phase: "ready",
+        branch,
+        defaultBranch,
+        files: Object.freeze([]),
+        diffs: new Map(),
+        diffsPending: false,
+      });
+      return;
+    }
     publish({
       phase: "ready",
       branch,
       defaultBranch,
-      files: Object.freeze(
-        diffs.map((diff) => ({
-          file: diff.file,
-          additions: diff.additions,
-          deletions: diff.deletions,
-          status: diff.status ?? "modified",
-        })),
-      ),
-      diffs: indexDiffs(diffs),
-      diffsPending: false,
+      files: Object.freeze([...lastTurn.files]),
+      diffs: new Map(),
+      diffsPending: true,
     });
+    const diffs = await client.git.checkpointDiff({
+      workspaceId,
+      from: `${sessionId}/${turns.at(-2)?.entryId ?? "base"}`,
+      to: `${sessionId}/${lastTurn.entryId}`,
+    });
+    if (sequence !== current || snapshot.phase !== "ready") return;
+    publish({ ...snapshot, diffs: indexDiffs(diffs), diffsPending: false });
   };
 
   const refresh = (): void => {
@@ -131,9 +136,9 @@ function createChangesResource(
       refreshQueued = true;
       return;
     }
-    const client = resolveClient(sessionRef.server);
+    const client = resolveClient();
     if (client === null) {
-      publish({ phase: "error", message: "Honk is not connected to OpenCode." });
+      publish({ phase: "error", message: "Honk Core is not connected yet." });
       return;
     }
 
@@ -180,36 +185,27 @@ function createChangesResource(
   };
 }
 
-function changesResourceKey(
-  sessionRef: OpenCodeSessionRef,
-  directory: string,
-  scope: ChangesScope,
-): string {
-  return `${openCodeSessionKey(sessionRef)}:${directory}:${scope}`;
+function changesResourceKey(sessionRef: WorkbenchSessionRef, scope: ChangesScope): string {
+  return `${sessionRef.sessionId}:${sessionRef.workspaceId}:${scope}`;
 }
 
 // One resource per scope: switching scopes swaps the resource rather than mutating a
 // shared one, so the grace timer keeps the previous scope warm for an instant switch back.
-function changesResourceFor(
-  sessionRef: OpenCodeSessionRef,
-  directory: string,
-  scope: ChangesScope,
-): ChangesResource {
-  const key = changesResourceKey(sessionRef, directory, scope);
+function changesResourceFor(sessionRef: WorkbenchSessionRef, scope: ChangesScope): ChangesResource {
+  const key = changesResourceKey(sessionRef, scope);
   const existing = changesResources.get(key);
   if (existing !== undefined) return existing;
-  const created = createChangesResource(sessionRef, directory, scope);
+  const created = createChangesResource(sessionRef, scope);
   changesResources.set(key, created);
   return created;
 }
 
 function useWorkbenchChangesSnapshot(
-  sessionRef: OpenCodeSessionRef,
-  directory: string,
+  sessionRef: WorkbenchSessionRef,
   scope: ChangesScope,
   isThreadRunning: boolean,
 ): ChangesSnapshot {
-  const resource = changesResourceFor(sessionRef, directory, scope);
+  const resource = changesResourceFor(sessionRef, scope);
   const snapshot = React.useSyncExternalStore(
     resource.subscribe,
     resource.getSnapshot,
@@ -221,7 +217,7 @@ function useWorkbenchChangesSnapshot(
   return snapshot;
 }
 
-function fileStatusGlyph(status: OpenCodeVcsFileStatus["status"]): "A" | "D" | "M" {
+function fileStatusGlyph(status: Git.ChangeStatus): "A" | "D" | "M" {
   switch (status) {
     case "added":
       return "A";
@@ -233,4 +229,4 @@ function fileStatusGlyph(status: OpenCodeVcsFileStatus["status"]): "A" | "D" | "
 }
 
 export { changesResourceFor, createChangesResource, fileStatusGlyph, useWorkbenchChangesSnapshot };
-export type { ChangesResource, ChangesScope, ChangesSnapshot };
+export type { ChangesClient, ChangesResource, ChangesScope, ChangesSnapshot };

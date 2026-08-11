@@ -1,31 +1,27 @@
 import * as stylex from "@stylexjs/stylex";
-import type { OpenCodeClient, OpenCodeMcpServerConfig, OpenCodeMcpStatus } from "@honk/opencode";
-import { Badge, Button, Field, SegmentedControl, Spinner, Text } from "@honk/ui";
+import { Mcp } from "@honk/core";
+import { Badge, Button, Field, Spinner, Text } from "@honk/ui";
+import { Session } from "@honk/core/session";
+import type { Workspace } from "@honk/core/workspace";
+import { useParams } from "@tanstack/react-router";
+import { Option, Schema } from "effect";
 import * as React from "react";
 
-import { persistDesktopMcpServer, readDesktopMcpAvailability } from "./desktop-bridge";
-import { errorMessage } from "./error-message";
+import { describeError, requireHonkClient } from "./chat/client";
+import { useSessionWorkspace } from "./chat/session-workspace";
 import { SettingsRow, SettingsRows, SettingsSection } from "./settings-controls";
-import {
-  SettingsAlert,
-  SettingsInventoryStatus,
-  SettingsNote,
-  useSettingsInventory,
-} from "./settings-inventory";
-import { getBoundOpenCodeClient } from "./watch-registry";
+import { SettingsAlert, SettingsFailure, SettingsNote, SettingsStatus } from "./settings-inventory";
 
-const MCP_STATUS_LABELS = {
-  connected: { label: "Connected", tone: "ok" },
-  disabled: { label: "Disabled", tone: "neutral" },
-  failed: { label: "Failed", tone: "err" },
-  needs_auth: { label: "Needs sign-in", tone: "warn" },
-  needs_client_registration: { label: "Needs registration", tone: "err" },
-} as const;
+const SECTION_DESCRIPTION =
+  "Servers for this chat's folder. Honk writes changes to its own override file and never edits shared MCP configs.";
 
-const MCP_TYPE_OPTIONS = [
-  { value: "local", label: "Local" },
-  { value: "remote", label: "Remote" },
-] as const;
+type McpSource = "global" | "project" | "override";
+
+const SOURCE_LABELS: Record<McpSource, string> = {
+  global: "Global",
+  project: "Project",
+  override: "Override",
+};
 
 const styles = stylex.create({
   sectionAction: {
@@ -33,114 +29,193 @@ const styles = stylex.create({
   },
 });
 
-type McpDraft = {
-  readonly type: "local" | "remote";
+type McpRow = {
   readonly name: string;
-  readonly target: string;
+  readonly transport: "stdio" | "http";
+  readonly source: McpSource;
+  readonly disabled: boolean;
+  readonly connected: boolean;
+  readonly tools: number;
 };
 
-function loadMcp(client: OpenCodeClient) {
-  return Promise.all([client.config.get(), client.mcp.status()]).then(([config, status]) => ({
-    config,
-    status,
-  }));
+type PanelState =
+  | { readonly phase: "loading" }
+  | { readonly phase: "failed"; readonly message: string; readonly code: string | null }
+  | { readonly phase: "ready"; readonly rows: readonly McpRow[] };
+
+type McpDraft = {
+  readonly name: string;
+  readonly command: string;
+};
+
+const decodeMcpFailure = Schema.decodeUnknownOption(Mcp.Failure);
+
+const errorCode = (error: unknown): string | null =>
+  Option.getOrNull(Option.map(decodeMcpFailure(error), (failure) => failure.code));
+
+// ConnectError carries the underlying failure verbatim in `detail`; the coded
+// line alone would hide the actionable part.
+function failureLine(error: unknown): string {
+  const line = describeError(error);
+  return Option.match(decodeMcpFailure(error), {
+    onNone: () => line,
+    onSome: (failure) =>
+      failure.code === "mcp.connect_failed" && failure.detail.length > 0
+        ? `${line} (${failure.detail})`
+        : line,
+  });
+}
+
+async function loadRows(workspaceId: Workspace.WorkspaceId): Promise<readonly McpRow[]> {
+  const client = requireHonkClient();
+  const [list, status] = await Promise.all([
+    client.mcp.list({ workspaceId }),
+    client.mcp.status({ workspaceId }),
+  ]);
+  // The config list is the truth; status only overlays live state, so a
+  // server the status read does not mention is simply not running.
+  const live = new Map(status.servers.map((server) => [server.name, server]));
+  return list.servers
+    .map((server) => ({
+      name: server.name,
+      transport: server.transport,
+      source: server.source,
+      disabled: server.disabled,
+      connected: live.get(server.name)?.connected ?? false,
+      tools: live.get(server.name)?.tools ?? 0,
+    }))
+    .toSorted((left, right) => left.name.localeCompare(right.name));
 }
 
 export function SettingsMcp(): React.ReactElement {
-  const inventory = useSettingsInventory(loadMcp);
+  // The overlay renders inside the router tree, so the open thread's route
+  // param decides which workspace this panel manages.
+  const params = useParams({ strict: false });
+  const sessionId = params.sessionId;
+  if (sessionId === undefined) {
+    return (
+      <SettingsSection description={SECTION_DESCRIPTION}>
+        <SettingsNote>Open a chat in a folder to manage its MCP servers.</SettingsNote>
+      </SettingsSection>
+    );
+  }
+  return <McpWorkspacePanel sessionId={Session.SessionId.make(sessionId)} />;
+}
+
+function McpWorkspacePanel(props: { readonly sessionId: Session.SessionId }): React.ReactElement {
+  const workspace = useSessionWorkspace(props.sessionId);
+  if (workspace.status === "loading") {
+    return (
+      <SettingsSection description={SECTION_DESCRIPTION}>
+        <SettingsStatus>Finding this chat's folder…</SettingsStatus>
+      </SettingsSection>
+    );
+  }
+  if (workspace.status === "failed") {
+    return (
+      <SettingsSection description={SECTION_DESCRIPTION}>
+        <SettingsNote>{workspace.message}</SettingsNote>
+      </SettingsSection>
+    );
+  }
+  return (
+    <McpServerList
+      key={workspace.workspace.workspaceId}
+      workspaceId={workspace.workspace.workspaceId}
+    />
+  );
+}
+
+function McpServerList(props: { readonly workspaceId: Workspace.WorkspaceId }): React.ReactElement {
+  const { workspaceId } = props;
+  const [state, setState] = React.useState<PanelState>({ phase: "loading" });
   const [draft, setDraft] = React.useState<McpDraft | null>(null);
   const [pending, setPending] = React.useState<string | null>(null);
   const [failure, setFailure] = React.useState<string | null>(null);
-  const data = inventory.state.phase === "ready" ? inventory.state.data : null;
-  const servers = data === null ? [] : mcpServerNames(data.config.mcp, data.status);
-  const availability = readDesktopMcpAvailability();
-  const canAdd = availability.status === "ready" && data !== null;
+  // The load lives in the effect, keyed by workspace and an explicit reload
+  // tick: a stable dependency set, so the effect runs once per (workspace,
+  // reload) and an unmounted or superseded load is dropped by its own flag.
+  const [loadTick, setLoadTick] = React.useState(0);
+  const reload = () => {
+    setState({ phase: "loading" });
+    setLoadTick((tick) => tick + 1);
+  };
 
-  const runServerAction = (
-    name: string,
-    fallback: string,
-    action: (client: OpenCodeClient) => Promise<unknown>,
-  ): void => {
-    const client = getBoundOpenCodeClient();
-    if (client === null) return;
+  React.useEffect(() => {
+    let stale = false;
+    loadRows(workspaceId).then(
+      (rows) => {
+        if (!stale) setState({ phase: "ready", rows });
+      },
+      (error: unknown) => {
+        if (!stale) {
+          setState({ phase: "failed", message: failureLine(error), code: errorCode(error) });
+        }
+      },
+    );
+    return () => {
+      stale = true;
+    };
+  }, [workspaceId, loadTick]);
+
+  const runServerAction = (name: string, action: () => Promise<unknown>): void => {
     setPending(name);
     setFailure(null);
-    void action(client)
+    void action()
       .then(
-        () => {
-          inventory.reload();
-        },
-        (cause: unknown) => {
-          setFailure(`${fallback} ${errorMessage(cause)}`);
+        () => undefined,
+        (error: unknown) => {
+          setFailure(failureLine(error));
         },
       )
       .then(() => {
         setPending(null);
+        reload();
       });
   };
 
   const addServer = (event: React.FormEvent<HTMLFormElement>): void => {
     event.preventDefault();
     if (draft === null) return;
-    const client = getBoundOpenCodeClient();
-    if (client === null) {
-      setFailure("Connect to OpenCode before adding an MCP server.");
+    const server = draft.name.trim();
+    const [command, ...args] = draft.command
+      .trim()
+      .split(/\s+/)
+      .filter((token) => token.length > 0);
+    if (server.length === 0 || command === undefined) {
+      setFailure("Enter a name and a command.");
       return;
     }
-    const name = draft.name.trim();
-    const target = draft.target.trim();
-    if (name.length === 0 || target.length === 0) {
-      setFailure("Enter a name and command or URL.");
-      return;
-    }
-    if (name === "honk") {
-      setFailure('The MCP server name "honk" is reserved.');
-      return;
-    }
-    const config =
-      draft.type === "local"
-        ? { type: "local" as const, command: target.split(/\s+/) }
-        : { type: "remote" as const, url: target };
-    setPending(name);
+    setPending(server);
     setFailure(null);
-    void persistDesktopMcpServer({ name, config })
+    void requireHonkClient()
+      .mcp.add({ workspaceId, server, command, ...(args.length === 0 ? {} : { args }) })
       .then(
         () => {
-          return client.mcp.add(name, config).then(
-            () => {
-              setDraft(null);
-              inventory.reload();
-            },
-            (cause: unknown) => {
-              setFailure(
-                `${name} was saved, but OpenCode could not load it. ${errorMessage(cause)}`,
-              );
-              inventory.reload();
-            },
-          );
+          setDraft(null);
         },
-        (cause: unknown) => {
-          setFailure(`${name} could not be saved. ${errorMessage(cause)}`);
+        (error: unknown) => {
+          setFailure(failureLine(error));
         },
       )
       .then(() => {
         setPending(null);
+        reload();
       });
   };
 
   return (
     <SettingsSection
-      description="Definitions are saved by Honk and loaded by OpenCode immediately."
+      description={SECTION_DESCRIPTION}
       action={
-        data === null || draft !== null ? undefined : (
+        state.phase !== "ready" || draft !== null ? undefined : (
           <div {...stylex.props(styles.sectionAction)}>
             <Button
               size="sm"
               variant="neutral"
-              disabled={!canAdd}
               onClick={() => {
                 setFailure(null);
-                setDraft({ type: "local", name: "", target: "" });
+                setDraft({ name: "", command: "" });
               }}
             >
               Add server
@@ -153,36 +228,8 @@ export function SettingsMcp(): React.ReactElement {
         <form onSubmit={addServer}>
           <SettingsRows>
             <SettingsRow
-              title="Type"
-              description={
-                draft.type === "local"
-                  ? "Runs a command on this computer."
-                  : "Connects to a remote MCP endpoint."
-              }
-              control={
-                <SegmentedControl
-                  value={draft.type}
-                  disabled={pending !== null}
-                  options={MCP_TYPE_OPTIONS}
-                  size="sm"
-                  accessibilityLabel="MCP server type"
-                  onValueChange={(value) => {
-                    setDraft((current) =>
-                      current === null
-                        ? null
-                        : {
-                            ...current,
-                            type: value,
-                            target: "",
-                          },
-                    );
-                  }}
-                />
-              }
-            />
-            <SettingsRow
               title="Name"
-              description="Existing servers with the same name are replaced."
+              description="How the chat refers to this server."
               control={
                 <Field>
                   <Field.Input
@@ -201,28 +248,19 @@ export function SettingsMcp(): React.ReactElement {
               }
             />
             <SettingsRow
-              title={draft.type === "local" ? "Command" : "URL"}
-              description={
-                draft.type === "local"
-                  ? "The executable and arguments, separated by spaces."
-                  : "The HTTP endpoint exposed by the MCP server."
-              }
+              title="Command"
+              description="The executable and arguments, separated by spaces."
               control={
                 <Field>
                   <Field.Input
                     required
                     size={28}
-                    type={draft.type === "remote" ? "url" : "text"}
-                    aria-label={draft.type === "local" ? "MCP server command" : "MCP server URL"}
-                    placeholder={
-                      draft.type === "local"
-                        ? "npx -y @example/mcp-server"
-                        : "https://mcp.example.com"
-                    }
-                    value={draft.target}
+                    aria-label="MCP server command"
+                    placeholder="npx -y @example/mcp-server"
+                    value={draft.command}
                     disabled={pending !== null}
                     onChange={(event) => {
-                      setDraft({ ...draft, target: event.currentTarget.value });
+                      setDraft({ ...draft, command: event.currentTarget.value });
                     }}
                   />
                 </Field>
@@ -230,7 +268,7 @@ export function SettingsMcp(): React.ReactElement {
             />
             <SettingsRow
               title="Add server"
-              description="Honk saves the definition before asking OpenCode to load it."
+              description="Saved to this folder's Honk override file."
               control={
                 <>
                   <Button
@@ -256,122 +294,95 @@ export function SettingsMcp(): React.ReactElement {
         </form>
       )}
 
-      <SettingsInventoryStatus
-        state={inventory.state}
-        loading="Loading MCP servers…"
-        unavailable="Connect to an OpenCode server to view MCP servers."
-        onRetry={inventory.reload}
-      />
-      {data !== null && availability.status === "restart-required" ? (
-        <SettingsNote>Restart Honk once to enable MCP editing.</SettingsNote>
+      {state.phase === "loading" ? <SettingsStatus>Loading MCP servers…</SettingsStatus> : null}
+      {state.phase === "failed" ? (
+        // An untrusted workspace is a product state, not a failure to retry.
+        state.code === "workspace.not_found" ? (
+          <SettingsNote>{state.message}</SettingsNote>
+        ) : (
+          <SettingsFailure message={state.message} onRetry={reload} />
+        )
       ) : null}
-      {data !== null && availability.status === "web" ? (
-        <SettingsNote>Add servers from the desktop app.</SettingsNote>
-      ) : null}
-      {data !== null && servers.length === 0 ? (
+      {state.phase === "ready" && state.rows.length === 0 ? (
         <SettingsNote>No MCP servers configured.</SettingsNote>
       ) : null}
-      {servers.length === 0 ? null : (
+      {state.phase !== "ready" || state.rows.length === 0 ? null : (
         <SettingsRows>
-          {servers.map((name) => {
-            const definition = data?.config.mcp?.[name];
-            const status = data?.status[name];
-            const detail = status === undefined ? null : MCP_STATUS_LABELS[status.status];
-            const reason = status !== undefined && "error" in status ? status.error : null;
-            const transport =
-              definition !== undefined && "type" in definition ? definition.type : null;
-            const action = mcpAction(status);
-            return (
-              <SettingsRow
-                key={name}
-                title={name}
-                description={
-                  <>
-                    {mcpEndpoint(definition)}
-                    {reason === null ? null : (
-                      <Text as="span" role="alert" size="sm" tone="err">
-                        {` · ${reason}`}
-                      </Text>
-                    )}
-                  </>
-                }
-                control={
-                  <>
-                    {transport === null ? null : (
-                      <Badge size="sm" tone="outline">
-                        {transport === "local" ? "Local" : "Remote"}
-                      </Badge>
-                    )}
-                    <Badge size="sm" tone={detail?.tone ?? "neutral"}>
-                      {detail?.label ?? "Not connected"}
+          {state.rows.map((row) => (
+            <SettingsRow
+              key={row.name}
+              title={row.name}
+              description={SOURCE_LABELS[row.source]}
+              control={
+                <>
+                  <Badge size="sm" tone="outline">
+                    {row.transport}
+                  </Badge>
+                  {row.disabled ? (
+                    <Badge size="sm" tone="neutral">
+                      Disabled
                     </Badge>
-                    {pending === name ? <Spinner size="sm" /> : null}
-                    {action === null ? null : (
-                      <Button
-                        size="sm"
-                        variant={action.variant}
-                        disabled={pending !== null}
-                        aria-busy={pending === name}
-                        onClick={() => {
-                          runServerAction(name, `${name} could not ${action.failure}.`, (client) =>
-                            action.run(client, name),
-                          );
-                        }}
-                      >
-                        {action.label}
-                      </Button>
-                    )}
-                  </>
-                }
-              />
-            );
-          })}
+                  ) : null}
+                  {row.connected ? (
+                    <>
+                      <Badge size="sm" tone="ok">
+                        Connected
+                      </Badge>
+                      <Text size="sm" tone="muted">
+                        {`${String(row.tools)} ${row.tools === 1 ? "tool" : "tools"}`}
+                      </Text>
+                    </>
+                  ) : null}
+                  {pending === row.name ? <Spinner size="sm" /> : null}
+                  {row.connected ? (
+                    <Button
+                      size="sm"
+                      variant="quiet"
+                      disabled={pending !== null}
+                      aria-busy={pending === row.name}
+                      onClick={() => {
+                        runServerAction(row.name, () =>
+                          requireHonkClient().mcp.disconnect({ workspaceId, server: row.name }),
+                        );
+                      }}
+                    >
+                      Disconnect
+                    </Button>
+                  ) : row.disabled ? null : (
+                    <Button
+                      size="sm"
+                      variant="neutral"
+                      disabled={pending !== null}
+                      aria-busy={pending === row.name}
+                      onClick={() => {
+                        runServerAction(row.name, () =>
+                          requireHonkClient().mcp.connect({ workspaceId, server: row.name }),
+                        );
+                      }}
+                    >
+                      Connect
+                    </Button>
+                  )}
+                  <Button
+                    size="sm"
+                    variant="quiet"
+                    disabled={pending !== null}
+                    aria-busy={pending === row.name}
+                    onClick={() => {
+                      runServerAction(row.name, () =>
+                        requireHonkClient().mcp.remove({ workspaceId, server: row.name }),
+                      );
+                    }}
+                  >
+                    Remove
+                  </Button>
+                </>
+              }
+            />
+          ))}
         </SettingsRows>
       )}
       {failure === null ? null : <SettingsAlert>{failure}</SettingsAlert>}
     </SettingsSection>
-  );
-}
-
-function mcpAction(status: OpenCodeMcpStatus | undefined) {
-  if (status?.status === "disabled") return null;
-  if (status?.status === "needs_auth") {
-    return {
-      label: "Sign in",
-      variant: "neutral",
-      failure: "sign in",
-      run: (client: OpenCodeClient, name: string) => client.mcp.authenticate(name),
-    } as const;
-  }
-  if (status?.status === "connected") {
-    return {
-      label: "Disconnect",
-      variant: "quiet",
-      failure: "be disconnected",
-      run: (client: OpenCodeClient, name: string) => client.mcp.disconnect(name),
-    } as const;
-  }
-  return {
-    label: "Connect",
-    variant: "neutral",
-    failure: "be connected",
-    run: (client: OpenCodeClient, name: string) => client.mcp.connect(name),
-  } as const;
-}
-
-function mcpEndpoint(definition: OpenCodeMcpServerConfig | undefined): string {
-  if (definition === undefined) return "Not present in the merged config.";
-  if ("type" in definition) {
-    return definition.type === "local" ? definition.command.join(" ") : definition.url;
-  }
-  return definition.enabled ? "Enabled by OpenCode." : "Disabled by OpenCode.";
-}
-
-function mcpServerNames(
-  definitions: Readonly<Record<string, unknown>> | undefined,
-  status: Readonly<Record<string, OpenCodeMcpStatus>>,
-): readonly string[] {
-  return [...new Set([...Object.keys(definitions ?? {}), ...Object.keys(status)])].toSorted(
-    (left, right) => left.localeCompare(right),
   );
 }

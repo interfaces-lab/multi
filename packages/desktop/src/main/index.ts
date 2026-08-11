@@ -22,19 +22,16 @@ import * as ElectronUpdater from "../electron/electron-updater";
 import * as ElectronWindow from "../electron/electron-window";
 import * as DesktopApp from "../app/desktop-app";
 import * as DesktopActiveWork from "../app/desktop-active-work";
-import * as DesktopAuxEndpoint from "../app/desktop-aux-endpoint";
 import * as DesktopAppIdentity from "../app/desktop-app-identity";
 import * as DesktopApplicationMenu from "../window/desktop-application-menu";
 import * as DesktopAssets from "../app/desktop-assets";
 import * as DesktopPty from "../backend/desktop-pty";
 import * as HonkCoreHost from "../backend/honk-core-host";
+import * as TailscaleRemoteAccess from "../backend/tailscale-remote-access";
 import * as DesktopEnvironment from "../app/desktop-environment";
 import * as DesktopLifecycle from "../app/desktop-lifecycle";
 import * as DesktopObservability from "../app/desktop-observability";
-import * as OpencodeSidecar from "../backend/opencode-sidecar";
-import * as DesktopRemoteHost from "../backend/desktop-remote-host";
 import * as DesktopQuitGuard from "../app/desktop-quit-guard";
-import * as DesktopServerExposure from "../backend/desktop-server-exposure";
 import * as DesktopClientSettings from "../settings/desktop-client-settings";
 import * as DesktopAppSettings from "../settings/desktop-app-settings";
 import * as DesktopShellEnvironment from "../shell/desktop-shell-environment";
@@ -83,30 +80,16 @@ const desktopFoundationLayer = Layer.mergeAll(
   DesktopObservability.layer,
 ).pipe(Layer.provideMerge(desktopEnvironmentLayer));
 
-const desktopServerExposureLayer = DesktopServerExposure.layer.pipe(
-  Layer.provideMerge(DesktopServerExposure.networkInterfacesLayer),
-  Layer.provideMerge(DesktopServerExposure.tailscaleEndpointLayer),
-  Layer.provideMerge(DesktopServerExposure.tunnelEndpointLayer),
-  Layer.provideMerge(desktopFoundationLayer),
-);
+const desktopWindowLayer = DesktopWindow.layer.pipe(Layer.provideMerge(desktopFoundationLayer));
 
-const desktopWindowLayer = DesktopWindow.layer.pipe(Layer.provideMerge(desktopServerExposureLayer));
-
-// The sidecar env carries the aux endpoint, so the endpoint holder must resolve
-// before the sidecar layer rather than alongside the rest of the application.
-const opencodeSidecarLayer = OpencodeSidecar.layer.pipe(
-  Layer.provideMerge(DesktopAuxEndpoint.layer),
-  Layer.provideMerge(desktopWindowLayer),
-);
-
-const desktopRemoteHostLayer = DesktopRemoteHost.layer.pipe(
-  Layer.provideMerge(opencodeSidecarLayer),
-);
-
-const desktopUpdatesLayer = DesktopUpdates.layer.pipe(Layer.provideMerge(desktopRemoteHostLayer));
+const desktopUpdatesLayer = DesktopUpdates.layer.pipe(Layer.provideMerge(desktopWindowLayer));
 
 const desktopBrowserLayer = DesktopBrowserViews.layer.pipe(
   Layer.provideMerge(DesktopBrowserAutomation.layer),
+);
+
+const coreRemoteAccessLayer = TailscaleRemoteAccess.layer.pipe(
+  Layer.provideMerge(HonkCoreHost.layer),
 );
 
 const desktopApplicationLayer = Layer.mergeAll(
@@ -116,7 +99,7 @@ const desktopApplicationLayer = Layer.mergeAll(
   DesktopShellEnvironment.layer,
   desktopBrowserLayer,
   DesktopPty.layer,
-  HonkCoreHost.layer,
+  coreRemoteAccessLayer,
 ).pipe(
   Layer.provideMerge(desktopUpdatesLayer),
   Layer.provideMerge(DesktopAppIdentity.layer),

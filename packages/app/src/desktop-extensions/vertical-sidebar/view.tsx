@@ -15,7 +15,6 @@ import {
   IconCrossSmall,
   IconFilter2,
   IconFolder1,
-  IconFolderAddRight,
   IconFolderOpen,
   IconGlobe,
   IconHomeRoofDoor,
@@ -35,23 +34,26 @@ import {
   useRef,
   useState,
   useSyncExternalStore,
+  type CSSProperties,
   type MouseEvent,
   type PointerEvent,
   type ReactElement,
 } from "react";
 
-import { useAppSettings } from "../../app-settings-store";
-import { canPickFolder, pickFolder } from "../../desktop-bridge";
-import { OpenTabContextMenu, WorkspaceContextMenu } from "../../tab-context-menu";
+import { TabContextMenu } from "../../tab-context-menu";
 import type { HonkDesktopCell, HonkDesktopTabs } from "../sdk";
-import { verticalSidebarLayout } from "./layout.stylex";
 import {
   STATUS_FILTER_OPTIONS,
+  verticalSidebarLayout,
+  type StatusFilter,
+  type VerticalSidebarInput,
+} from "./extension";
+import {
   buildWorkspaceDrop,
   collapsedKeySet,
   filterWorkspaceGroups,
   groupWorkspaceTabs,
-  isPathBackedGroup,
+  groupHasPath,
   mergeWorkspaceOrder,
   scrollFadeEdges,
   statusLabel,
@@ -59,10 +61,8 @@ import {
   toggleCollapsedKey,
   toggleSessionCollapsedKey,
   type ScrollFadeEdges,
-  type StatusFilter,
   type WorkspaceTabGroup,
 } from "./model";
-import type { VerticalSidebarInput } from "./types";
 
 const DRAG_ACTIVATION_DISTANCE = 4;
 const WORKSPACE_ORDER_CAP = 50;
@@ -76,11 +76,13 @@ const HOVER_ACTION_INLINE_END = sidebarVars["--honk-sidebar-row-padding-inline"]
 // 0 once that edge is reached, so the mask only reports scrollable content.
 const SCROLL_FADE_TOP = "18px";
 const SCROLL_FADE_BOTTOM = "36px";
+// Cursor Glass 3.15.1 seats vertical tab previews 4px to the right of the owning row.
+const VERTICAL_TAB_PREVIEW_SIDE_OFFSET = 4;
 const NO_SCROLL_FADE: ScrollFadeEdges = { showTop: false, showBottom: false };
 
-const TITLE_PRIMARY = { color: colorVars["--honk-color-text-primary"] } as const;
-const TITLE_MUTED = { color: colorVars["--honk-color-text-muted"] } as const;
-const TITLE_FAINT = { color: colorVars["--honk-color-text-faint"] } as const;
+const TITLE_PRIMARY: CSSProperties = { color: colorVars["--honk-color-text-primary"] };
+const TITLE_MUTED: CSSProperties = { color: colorVars["--honk-color-text-muted"] };
+const TITLE_FAINT: CSSProperties = { color: colorVars["--honk-color-text-faint"] };
 
 const styles = create({
   // Cursor masks the scroller instead of drawing a scrolled divider; `black` here is a mask
@@ -111,11 +113,13 @@ const styles = create({
       default: "0",
       ":hover": { "@media (hover: hover)": "1" },
       ":focus-within": "1",
+      ":has([data-popup-open])": "1",
     },
     "--_row-action-pointer-events": {
       default: "none",
       ":hover": { "@media (hover: hover)": "auto" },
       ":focus-within": "auto",
+      ":has([data-popup-open])": "auto",
     },
     position: "relative",
     minWidth: 0,
@@ -150,10 +154,6 @@ const styles = create({
     justifyContent: "center",
     opacity: "var(--_row-action-opacity, 0)",
     pointerEvents: "var(--_row-action-pointer-events, none)",
-  },
-  rowActionCluster: {
-    display: "inline-flex",
-    gap: sidebarVars["--honk-sidebar-item-gap"],
   },
   rowActionPinned: {
     opacity: 1,
@@ -193,16 +193,6 @@ const styles = create({
       default: "0",
       ":hover": { "@media (hover: hover)": "1" },
       ":focus-within": "1",
-    },
-    "--_row-action-opacity": {
-      default: "0",
-      ":hover": { "@media (hover: hover)": "1" },
-      ":focus-within": "1",
-    },
-    "--_row-action-pointer-events": {
-      default: "none",
-      ":hover": { "@media (hover: hover)": "auto" },
-      ":focus-within": "auto",
     },
     position: "relative",
     minWidth: 0,
@@ -256,6 +246,7 @@ const styles = create({
       ":focus-within": "auto",
     },
     position: "relative",
+    width: "100%",
     minWidth: 0,
   },
   rowActive: {
@@ -298,7 +289,7 @@ const styles = create({
 });
 
 // Scales the 20px matrix into the 16px leading slot without changing glyph geometry.
-const MATRIX_FIT = { transform: "scale(0.8)" } as const;
+const MATRIX_FIT: CSSProperties = { transform: "scale(0.8)" };
 
 type WorkspaceDragSession = {
   readonly pointerId: number;
@@ -370,7 +361,7 @@ export function VerticalSidebar(input: VerticalSidebarInput): ReactElement {
   };
   // Callback ref, not an effect: the fade tracks a layout fact the DOM owns. Stable identity so
   // the observer is not torn down on every render. The scroller's own box rarely changes, so the
-  // content column is observed too — it resizes whenever a group collapses or a tab opens.
+  // content column is observed too, it resizes whenever a group collapses or a tab opens.
   const attachScroller = useCallback((element: HTMLElement | null): (() => void) => {
     if (element === null) return () => {};
     publishScrollFade(element, setScrollFade);
@@ -398,7 +389,6 @@ export function VerticalSidebar(input: VerticalSidebarInput): ReactElement {
               onActivate={tabHandlers.activate}
             />
             <WorkspaceCollection
-              tabs={input.tabs}
               groups={visibleGroups}
               activeKey={snapshot.activeKey}
               collectionID={workspaceCollectionID}
@@ -436,7 +426,7 @@ function HomeTabRow(input: {
   const isActive = input.activeKey === input.tab.key;
   return (
     <div {...props(styles.home)}>
-      <OpenTabContextMenu tab={input.tab}>
+      <TabContextMenu tab={input.tab}>
         <ListRow
           size="sm"
           data-honk-desktop-tab-key={input.tab.key}
@@ -451,13 +441,12 @@ function HomeTabRow(input: {
             {input.tab.title}
           </ListRow.Title>
         </ListRow>
-      </OpenTabContextMenu>
+      </TabContextMenu>
     </div>
   );
 }
 
 function WorkspaceCollection(input: {
-  readonly tabs: HonkDesktopTabs;
   readonly groups: readonly WorkspaceTabGroup[];
   readonly activeKey: string;
   readonly collectionID: string;
@@ -472,11 +461,6 @@ function WorkspaceCollection(input: {
   readonly threadFilters: HonkDesktopCell<readonly StatusFilter[]>;
 }): ReactElement {
   const filtersActive = input.filters.length > 0;
-  const canOpenWorkspace = canPickFolder();
-  const appSettings = useAppSettings();
-  const openWorkspaceFolder = (): void => {
-    void openWorkspace(input.tabs, appSettings.defaultProjectDirectory);
-  };
 
   return (
     <section aria-label="Workspace tabs" {...props(styles.workspaceCollection)}>
@@ -494,17 +478,10 @@ function WorkspaceCollection(input: {
                 <Icon icon={IconChevronRightMedium} size="xs" tone="faint" />
               </span>
             </span>
-            {Array.from({ length: canOpenWorkspace ? 2 : 1 }, renderActionSpacer)}
+            <span aria-hidden {...props(styles.actionSpacer)} />
           </ListRow.Meta>
         </ListRow>
-        <div
-          {...props(
-            styles.rowAction,
-            styles.rowActionCluster,
-            styles.fade,
-            filtersActive && styles.rowActionPinned,
-          )}
-        >
+        <div {...props(styles.rowAction, styles.fade, filtersActive && styles.rowActionPinned)}>
           <Menu.Root>
             <Menu.Trigger
               render={
@@ -529,15 +506,6 @@ function WorkspaceCollection(input: {
               ))}
             </Menu.Popup>
           </Menu.Root>
-          {canOpenWorkspace ? (
-            <ListRow.Action
-              aria-label="Open workspace"
-              title="Open workspace"
-              onClick={openWorkspaceFolder}
-            >
-              <Icon icon={IconFolderAddRight} size="sm" />
-            </ListRow.Action>
-          ) : null}
         </div>
       </div>
       {input.isOpen ? (
@@ -579,8 +547,7 @@ function WorkspaceGroup(input: {
   readonly dragHandlers: WorkspaceDragHandlers;
   readonly tabHandlers: TabRowHandlers;
 }): ReactElement | null {
-  const seedTab = input.group.tabs[0]?.tab;
-  if (seedTab === undefined) return null;
+  if (input.group.tabs.length === 0) return null;
   const hasActiveTab = input.group.tabs.some((entry) => entry.tab.key === input.activeKey);
 
   return (
@@ -595,21 +562,14 @@ function WorkspaceGroup(input: {
         input.dropAfter === true && styles.dropAfter,
       )}
     >
-      <WorkspaceContextMenu
-        tabKey={seedTab.key}
-        {...(input.group.path === undefined ? {} : { path: input.group.path })}
-      >
-        <WorkspaceHeader
-          group={input.group}
-          seedTab={seedTab}
-          panelID={input.panelID}
-          isOpen={input.isOpen}
-          hasActiveTab={hasActiveTab}
-          onToggleWorkspace={input.onToggleWorkspace}
-          dragHandlers={input.dragHandlers}
-          onCreateTab={input.tabHandlers.create}
-        />
-      </WorkspaceContextMenu>
+      <WorkspaceHeader
+        group={input.group}
+        panelID={input.panelID}
+        isOpen={input.isOpen}
+        hasActiveTab={hasActiveTab}
+        onToggleWorkspace={input.onToggleWorkspace}
+        dragHandlers={input.dragHandlers}
+      />
       {input.isOpen ? (
         <div
           id={input.panelID}
@@ -634,21 +594,14 @@ function WorkspaceGroup(input: {
 
 function WorkspaceHeader(input: {
   readonly group: WorkspaceTabGroup;
-  readonly seedTab: Exclude<TabDescriptor, { readonly kind: "home" }>;
   readonly panelID: string;
   readonly isOpen: boolean;
   readonly hasActiveTab: boolean;
   readonly onToggleWorkspace: RowMouseHandler;
   readonly dragHandlers: WorkspaceDragHandlers;
-  readonly onCreateTab: RowMouseHandler;
 }): ReactElement {
-  const accessibleLabel = [
-    input.group.label,
-    input.group.serverLabel,
-    `${input.group.tabs.length} open ${input.group.tabs.length === 1 ? "tab" : "tabs"}`,
-  ]
-    .filter((value): value is string => value !== undefined)
-    .join(", ");
+  const tabCount = input.group.tabs.length;
+  const accessibleLabel = `${input.group.label}, ${tabCount} open ${tabCount === 1 ? "tab" : "tabs"}`;
   // Cursor signals selection by promoting the row's foreground, glyph included, not by a
   // heavier fill.
   const glyphTone = input.hasActiveTab ? "current" : "faint";
@@ -689,16 +642,6 @@ function WorkspaceHeader(input: {
           <span aria-hidden {...props(styles.actionSpacer)} />
         </ListRow.Meta>
       </ListRow>
-      <span {...props(styles.rowAction, styles.fade)}>
-        <ListRow.Action
-          data-honk-relative-tab-key={input.seedTab.key}
-          aria-label={`New thread in ${input.group.label}`}
-          title={`New thread in ${input.group.label}`}
-          onClick={input.onCreateTab}
-        >
-          <Icon icon={IconPlusSmall} size="xs" />
-        </ListRow.Action>
-      </span>
     </div>
   );
 }
@@ -709,16 +652,11 @@ function TabRow(input: {
   readonly onActivate: RowMouseHandler;
   readonly onClose: RowMouseHandler;
 }): ReactElement {
-  const accessibleLabel =
-    input.tab.server === undefined
-      ? input.tab.title
-      : `${input.tab.title}, ${input.tab.server.label}`;
   const row = (
     <div {...props(styles.row, input.isActive && styles.rowActive)}>
       <ListRow
         size="sm"
         data-honk-desktop-tab-key={input.tab.key}
-        aria-label={accessibleLabel}
         aria-current={input.isActive ? "page" : undefined}
         title={input.tab.title}
         isSelected={input.isActive}
@@ -747,9 +685,18 @@ function TabRow(input: {
       </span>
     </div>
   );
-  const withContextMenu = <OpenTabContextMenu tab={input.tab}>{row}</OpenTabContextMenu>;
+  const withContextMenu = <TabContextMenu tab={input.tab}>{row}</TabContextMenu>;
   if (input.tab.kind !== "thread") return withContextMenu;
-  return <SessionTabPreviewTooltip tab={input.tab}>{withContextMenu}</SessionTabPreviewTooltip>;
+  return (
+    <SessionTabPreviewTooltip
+      tab={input.tab}
+      side="right"
+      align="start"
+      sideOffset={VERTICAL_TAB_PREVIEW_SIDE_OFFSET}
+    >
+      {withContextMenu}
+    </SessionTabPreviewTooltip>
+  );
 }
 
 function TabGlyph(input: {
@@ -803,8 +750,8 @@ function createTabHandlers(tabs: HonkDesktopTabs): TabRowHandlers {
       const key = event.currentTarget.dataset.honkDesktopTabKey;
       if (key !== undefined) tabs.close(key);
     },
-    create: (event) => {
-      tabs.create(event.currentTarget.dataset.honkRelativeTabKey);
+    create: () => {
+      tabs.create();
     },
   };
 }
@@ -824,7 +771,7 @@ function createCollapseToggle(input: {
     }
     const group = input.groups.find((candidate) => candidate.key === key);
     if (group === undefined) return;
-    if (!isPathBackedGroup(group)) {
+    if (!groupHasPath(group)) {
       input.setEphemeralKeys((current) => toggleSessionCollapsedKey(current, key, input.groups));
       return;
     }
@@ -929,14 +876,6 @@ function scrollFadeStyle(edges: ScrollFadeEdges) {
   return undefined;
 }
 
-async function openWorkspace(
-  tabs: HonkDesktopTabs,
-  defaultDirectory: string | null,
-): Promise<void> {
-  const directory = await pickFolder(defaultDirectory);
-  if (directory !== null) tabs.openDraft(directory);
-}
-
 function toggleStatusFilter(
   cell: HonkDesktopCell<readonly StatusFilter[]>,
   value: StatusFilter,
@@ -946,8 +885,4 @@ function toggleStatusFilter(
       current.includes(value) ? current.filter((filter) => filter !== value) : [...current, value],
     ),
   );
-}
-
-function renderActionSpacer(_value: unknown, index: number): ReactElement {
-  return <span key={index} aria-hidden {...props(styles.actionSpacer)} />;
 }

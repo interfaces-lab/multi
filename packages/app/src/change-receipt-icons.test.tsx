@@ -21,7 +21,6 @@ describe("ChangeReceipt file icons", () => {
 
     expect(receipt).toContain('data-icon-token="typescript"');
     expect(receipt).toContain('href="#file-tree-builtin-typescript"');
-    expect(typescriptIconClass).toContain("file-type-icon__styles.iconBlue");
     expect(receipt).toContain(`class="${typescriptIconClass}"`);
     expect(receipt).toContain(`class="${jsonIconClass}"`);
     expect(typescriptIconClass).not.toBe(jsonIconClass);

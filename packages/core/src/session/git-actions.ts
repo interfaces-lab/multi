@@ -44,11 +44,7 @@ const STEPS: Record<GitActionId, readonly string[]> = {
     "Create one concise commit.",
     "Push the branch and set upstream when needed.",
   ],
-  commit: [
-    "Stage only the intended file paths.",
-    "Create one concise commit.",
-    "Do not push.",
-  ],
+  commit: ["Stage only the intended file paths.", "Create one concise commit.", "Do not push."],
   commitAndPush: [
     "Stage only the intended file paths.",
     "Create one concise commit.",
@@ -67,10 +63,7 @@ const STEPS: Record<GitActionId, readonly string[]> = {
  * The transcript stores this as the turn's real user message, so what the
  * model saw is always what a surface can show.
  */
-export const instructionsFor = (
-  action: GitActionId,
-  files?: readonly string[] | undefined,
-): string =>
+export const instructionsFor = (action: GitActionId, files?: readonly string[]): string =>
   [
     ...HEADER,
     ...STEPS[action],

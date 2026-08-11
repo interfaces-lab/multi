@@ -1,4 +1,5 @@
-import { OpenCodeRequestError, type OpenCodeClient } from "@honk/opencode";
+import { Files, type HonkClient } from "@honk/core";
+import { Workspace } from "@honk/core/workspace";
 import { describe, expect, it, vi } from "vitest";
 
 import {
@@ -7,103 +8,101 @@ import {
   type FileViewerState,
 } from "./workbench-file-viewer";
 
-type FilesApi = OpenCodeClient["files"];
+type FilesApi = HonkClient["files"];
 
-function client(files: Partial<FilesApi>): Pick<OpenCodeClient, "files"> {
-  return { files: files as FilesApi };
+interface ClientOverrides {
+  readonly read?: FilesApi["read"];
+  readonly write?: FilesApi["write"];
+}
+
+const workspaceId = Workspace.WorkspaceId.make("ws_viewer");
+
+function client(overrides: ClientOverrides) {
+  return {
+    files: {
+      read:
+        overrides.read ?? vi.fn().mockResolvedValue({ type: "text", text: "", truncated: false }),
+      write: overrides.write ?? vi.fn().mockResolvedValue(undefined),
+    },
+  };
+}
+
+function notFound(): Files.NotFoundError {
+  return new Files.NotFoundError({ path: "src/value.ts" });
 }
 
 // The resource loads on first subscribe, so settling is one microtask drain past that.
 async function settle(
-  files: Partial<FilesApi>,
+  overrides: ClientOverrides,
   path = "src/value.ts",
 ): Promise<{ readonly state: FileViewerState; readonly refresh: () => void }> {
-  const resource = createFileViewerResource("/repo", path, () => client(files));
+  const resource = createFileViewerResource(workspaceId, path, () => client(overrides));
   resource.subscribe(() => {});
   await vi.waitUntil(() => resource.getSnapshot().phase !== "loading");
   return { state: resource.getSnapshot(), refresh: resource.refresh };
 }
 
 describe("workbench file viewer content states", () => {
-  it("renders decoded text and asks the sidecar for the tab's directory", async () => {
-    const read = vi.fn().mockResolvedValue({ kind: "text", text: "const one = 1;\n" });
+  it("renders decoded text and names the tab's workspace in the read", async () => {
+    const read = vi.fn().mockResolvedValue({ type: "text", text: "const one = 1;\n" });
 
     const { state } = await settle({ read });
 
     expect(state).toEqual({ phase: "ready", text: "const one = 1;\n" });
-    expect(read).toHaveBeenCalledWith("src/value.ts", { directory: "/repo" });
+    expect(read).toHaveBeenCalledWith({ workspaceId, path: "src/value.ts" });
   });
 
-  it("names the actual media type instead of rendering a binary payload", async () => {
+  it("reports a binary file with its size instead of rendering the payload", async () => {
     const { state } = await settle({
-      read: vi.fn().mockResolvedValue({ kind: "binary", base64: "AAA=", mimeType: "image/png" }),
+      read: vi.fn().mockResolvedValue({ type: "binary", size: 2048 }),
     });
 
-    expect(state).toEqual({ phase: "binary", mimeType: "image/png" });
+    expect(state).toEqual({ phase: "binary", sizeBytes: 2048 });
   });
 
   it("refuses a file past the render cap before building any rows", async () => {
     const text = "x".repeat(FILE_VIEWER_MAX_CHARACTERS + 1);
 
-    const { state } = await settle({ read: vi.fn().mockResolvedValue({ kind: "text", text }) });
+    const { state } = await settle({ read: vi.fn().mockResolvedValue({ type: "text", text }) });
 
     expect(state).toEqual({ phase: "oversized", characters: text.length });
   });
 
-  it("separates a deleted file from an empty one through the raw read response", async () => {
-    const missing = await settle({
-      read: vi
-        .fn()
-        .mockRejectedValue(
-          new OpenCodeRequestError("fs.read", "Not found", new Response(null, { status: 404 })),
-        ),
-    });
+  it("separates a deleted file from an empty one through the typed refusal", async () => {
+    const missing = await settle({ read: vi.fn().mockRejectedValue(notFound()) });
     const empty = await settle({
-      read: vi.fn().mockResolvedValue({ kind: "text", text: "" }),
+      read: vi.fn().mockResolvedValue({ type: "text", text: "" }),
     });
 
     expect(missing.state).toEqual({ phase: "missing" });
     expect(empty.state).toEqual({ phase: "empty" });
   });
 
-  it("does not need a directory listing to recognize an empty root file", async () => {
-    const list = vi.fn().mockResolvedValue({ data: [] });
-
-    await settle(
-      { read: vi.fn().mockResolvedValue({ kind: "text", text: "" }), list },
-      "README.md",
-    );
-
-    expect(list).not.toHaveBeenCalled();
-  });
-
-  it("writes the current draft against the loaded contents", async () => {
+  it("writes the current draft as the file's whole content", async () => {
     const write = vi.fn().mockResolvedValue(undefined);
-    const resource = createFileViewerResource("/repo", "src/value.ts", () =>
-      client({ read: vi.fn(), write }),
-    );
+    const resource = createFileViewerResource(workspaceId, "src/value.ts", () => client({ write }));
 
-    await resource.save("const value = 1;\n", "const value = 2;\n");
+    await resource.save("const value = 2;\n");
 
-    expect(write).toHaveBeenCalledWith(
-      "src/value.ts",
-      { expectedContents: "const value = 1;\n", contents: "const value = 2;\n" },
-      { directory: "/repo" },
-    );
+    expect(write).toHaveBeenCalledWith({
+      workspaceId,
+      path: "src/value.ts",
+      content: "const value = 2;\n",
+    });
   });
 
   it("reports a failed read and recovers on retry", async () => {
     const read = vi
       .fn()
-      .mockRejectedValueOnce(new Error("fs.read failed with 500"))
-      .mockResolvedValue({ kind: "text", text: "recovered" });
-    const resource = createFileViewerResource("/repo", "src/value.ts", () => client({ read }));
+      .mockRejectedValueOnce(new Error("files.read failed"))
+      .mockResolvedValue({ type: "text", text: "recovered" });
+    const resource = createFileViewerResource(workspaceId, "src/value.ts", () => client({ read }));
     resource.subscribe(() => {});
     await vi.waitUntil(() => resource.getSnapshot().phase !== "loading");
 
     expect(resource.getSnapshot()).toEqual({
       phase: "error",
-      message: "fs.read failed with 500",
+      message: "files.read failed",
     });
 
     resource.refresh();
@@ -111,22 +110,22 @@ describe("workbench file viewer content states", () => {
     expect(resource.getSnapshot()).toEqual({ phase: "ready", text: "recovered" });
   });
 
-  it("reports a disconnected client without calling the sidecar", async () => {
-    const resource = createFileViewerResource("/repo", "src/value.ts", () => null);
+  it("reports a disconnected client without calling core", async () => {
+    const resource = createFileViewerResource(workspaceId, "src/value.ts", () => null);
     resource.subscribe(() => {});
 
     expect(resource.getSnapshot()).toEqual({
       phase: "error",
-      message: "Honk is not connected to OpenCode.",
+      message: "Honk Core is not connected yet.",
     });
   });
 
   it("rereads the file when a thread run finishes", async () => {
     const read = vi
       .fn()
-      .mockResolvedValueOnce({ kind: "text", text: "before" })
-      .mockResolvedValue({ kind: "text", text: "after" });
-    const resource = createFileViewerResource("/repo", "src/value.ts", () => client({ read }));
+      .mockResolvedValueOnce({ type: "text", text: "before" })
+      .mockResolvedValue({ type: "text", text: "after" });
+    const resource = createFileViewerResource(workspaceId, "src/value.ts", () => client({ read }));
     resource.subscribe(() => {});
     await vi.waitUntil(() => resource.getSnapshot().phase !== "loading");
 
@@ -150,12 +149,12 @@ describe("workbench file viewer content states", () => {
         () =>
           new Promise((resolve) => {
             setTimeout(() => {
-              resolve({ kind: "text", text: "stale" });
+              resolve({ type: "text", text: "stale" });
             }, 20);
           }),
       )
-      .mockResolvedValue({ kind: "text", text: "fresh" });
-    const resource = createFileViewerResource("/repo", "src/value.ts", () => client({ read }));
+      .mockResolvedValue({ type: "text", text: "fresh" });
+    const resource = createFileViewerResource(workspaceId, "src/value.ts", () => client({ read }));
     resource.subscribe(() => {});
     resource.refresh();
     await vi.waitUntil(() => resource.getSnapshot().phase !== "loading");

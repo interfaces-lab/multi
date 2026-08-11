@@ -6,11 +6,12 @@ import { createModels } from "@earendil-works/pi-ai";
 import { fauxAssistantMessage, fauxProvider } from "@earendil-works/pi-ai/providers/faux";
 import { describe, expect, it } from "vitest";
 
-import type { HonkClient } from "../../src/honk-core";
+import type { HonkClient, SessionWatchCalls } from "../../src/client";
+import { watchSession } from "../../src/client";
 import { createHonkCore } from "../../src/honk-core";
 import { Files } from "../../src/files";
 import { Session } from "../../src/session";
-import { createExecutionEnv, messageEntries, textOf } from "../../src/testing";
+import { createExecutionEnv, gatedResponse, messageEntries, textOf } from "../../src/testing";
 import { Workspace } from "../../src/workspace";
 
 const startCore = async () => {
@@ -25,6 +26,7 @@ const startCore = async () => {
     // path would leak sessions and lease conflicts between runs.
     dataDirectory: await mkdtemp(join(tmpdir(), "honk-core-data-")),
     createModels: () => collection,
+    generateSessionTitle: Session.generatePromptSessionTitle,
     createExecutionEnv,
   });
   return { core, faux };
@@ -56,10 +58,50 @@ describe("createHonkCore", () => {
     await sdk.session.prompt({ sessionId: session.id, text: "Say hello" });
 
     const state = await sdk.session.reload({ sessionId: session.id });
-    expect(state.status).toBe("idle");
+    expect(state.phase).toBe("idle");
     expect(messageEntries(state.entries).map(textOf)).toEqual(["Say hello", "Hello from Pi."]);
 
     await core.close();
+  });
+
+  it("aborts and settles a live Pi harness before close returns", async () => {
+    const { core, faux } = await startCore();
+    const sdk = core.client();
+    const workspace = await openTrusted(sdk, "/tmp/honk-core-test/close-running");
+    const session = await sdk.session.create({ workspaceId: workspace.id });
+    const gated = gatedResponse("never delivered");
+    let markAborted!: () => void;
+    const aborted = new Promise<void>((resolve) => {
+      markAborted = resolve;
+    });
+    faux.setResponses([
+      async (context, options, state, model) => {
+        const signal = options?.signal;
+        if (signal?.aborted === true) markAborted();
+        else signal?.addEventListener("abort", markAborted, { once: true });
+        return gated.response(context, options, state, model);
+      },
+    ]);
+
+    let markStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      markStarted = resolve;
+    });
+    const watching = (async () => {
+      for await (const frame of sdk.session.events({ sessionId: session.id })) {
+        if (frame.type === "event" && frame.event.type === "agent_start") {
+          markStarted();
+          break;
+        }
+      }
+    })();
+    const running = sdk.session.prompt({ sessionId: session.id, text: "wait" }).catch(() => {});
+    await started;
+    await watching;
+
+    await core.close();
+    await aborted;
+    await running;
   });
 
   it("hands out independent clients from one core", async () => {
@@ -162,6 +204,106 @@ describe("createHonkCore", () => {
     expect(finalState?.texts).toEqual(["Watch this", "Watched."]);
 
     await core.close();
+  });
+
+  it("watch reloads only the unseen Pi entry tail", async () => {
+    const sessionId = Session.SessionId.make("session-1");
+    const first: Session.SessionTreeEntry = {
+      type: "custom",
+      id: "entry-1",
+      parentId: null,
+      timestamp: "2026-01-01T00:00:00.000Z",
+      customType: "test",
+    };
+    const second: Session.SessionTreeEntry = { ...first, id: "entry-2", parentId: first.id };
+    const reloadInputs: unknown[] = [];
+    const reloads: Session.ReloadOutput[] = [
+      { entries: [first], phase: "idle", entrySeq: 1 },
+      { entries: [second], phase: "idle", entrySeq: 2 },
+    ];
+    const eventFrames: readonly Session.EventsFrame[] = [
+      { type: "live" },
+      { type: "event", event: { type: "settled", nextTurnCount: 0 } },
+    ];
+    const calls: SessionWatchCalls = {
+      reload: async (input) => {
+        reloadInputs.push(input);
+        const next = reloads.shift();
+        if (next === undefined) throw new Error("unexpected reload");
+        return next;
+      },
+      changes: async () => ({ turns: [] }),
+      events: async function* () {
+        yield* eventFrames;
+      },
+    };
+
+    const states = [];
+    for await (const frame of watchSession(calls, { sessionId })) {
+      if (frame.type === "state") states.push(frame);
+    }
+
+    expect(reloadInputs).toEqual([{ sessionId }, { sessionId, afterEntrySeq: 1 }]);
+    expect(states.at(-1)?.entries).toEqual([first, second]);
+  });
+
+  it("watch replaces the active branch after tree navigation, then resumes from the log cursor", async () => {
+    const sessionId = Session.SessionId.make("session-tree");
+    const root: Session.SessionTreeEntry = {
+      type: "custom",
+      id: "root",
+      parentId: null,
+      timestamp: "2026-01-01T00:00:00.000Z",
+      customType: "test",
+    };
+    const old = { ...root, id: "old", parentId: root.id };
+    const revised = { ...root, id: "revised", parentId: root.id };
+    const answer = { ...root, id: "answer", parentId: revised.id };
+    const reloadInputs: unknown[] = [];
+    const reloads: Session.ReloadOutput[] = [
+      { entries: [root, old], phase: "idle", entrySeq: 2 },
+      { entries: [root, revised], phase: "idle", entrySeq: 3 },
+      { entries: [answer], phase: "turn", entrySeq: 4 },
+    ];
+    const eventFrames: readonly Session.EventsFrame[] = [
+      { type: "live" },
+      {
+        type: "event",
+        event: {
+          type: "session_tree",
+          oldLeafId: old.id,
+          newLeafId: root.id,
+        },
+      },
+      {
+        type: "event",
+        event: { type: "agent_start" },
+      },
+    ];
+    const calls: SessionWatchCalls = {
+      reload: async (input) => {
+        reloadInputs.push(input);
+        const next = reloads.shift();
+        if (next === undefined) throw new Error("unexpected reload");
+        return next;
+      },
+      changes: async () => ({ turns: [] }),
+      events: async function* () {
+        yield* eventFrames;
+      },
+    };
+
+    const states = [];
+    for await (const frame of watchSession(calls, { sessionId })) {
+      if (frame.type === "state") states.push(frame);
+    }
+
+    expect(reloadInputs).toEqual([{ sessionId }, { sessionId }, { sessionId, afterEntrySeq: 3 }]);
+    expect(states.map((state) => state.entries)).toEqual([
+      [root, old],
+      [root, revised],
+      [root, revised, answer],
+    ]);
   });
 });
 

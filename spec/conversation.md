@@ -1,236 +1,253 @@
 # The conversation surface
 
-How a Honk thread renders an agent turn: what the user sees while the agent
-works, what it collapses to when the agent finishes, and who controls how much
-detail is on screen.
+How a Honk thread renders an agent turn, carries a user's message, and preserves
+the session tree. Pi owns the loop, transcript, queues, and branches. Honk
+projects that state into a durable chat interface without another message
+model.
 
-Reference: Cursor 3.15.1 (`workbench.glass.main.js`, sha256 `020a4bce8862b87b…`),
-investigated per `docs/cursor-parity-handbook.md`. Behavioral rules below are
-translated, not transplanted. Pi's TUI is the reference for narration.
+Reference: Cursor 3.15.1 (`workbench.glass.main.js`, sha256
+`020a4bce8862b87b…`), investigated per
+[`docs/cursor-parity-handbook.md`](../docs/cursor-parity-handbook.md).
+Behavioral rules are translated, not transplanted. Pi's TUI is the reference
+for harness semantics.
 
 ## 1. The turn grammar
 
 A Pi assistant turn is an ordered stream of content blocks: text, tool calls,
 text, tool calls. Tool results arrive separately, keyed by call id. That order
-is the whole segmentation model — nothing new is stored:
+is the segmentation model; Honk stores nothing beside it:
 
-```
+```text
 turn    := planning? segment* summary?
 segment := headline (one assistant text block)
            followed by a run of tool calls and their results
 ```
 
 - **Planning** is the gap between the user's message and the first block. The
-  surface shows a "Planning next move" shimmer.
-- **A headline** is any assistant text block emitted between tool work. The
+  surface shows a “Planning next move” shimmer.
+- **A headline** is an assistant text block emitted between tool work. The
   model narrates naturally; Honk does not prompt for it. A segment without a
-  preceding text block gets no headline and still renders.
+  preceding text block still renders.
 - **The summary** is the turn's final text block. It stays visible after the
   turn collapses.
 
 ## 2. Disclosure layers
 
-Every turn renders at one of four layers. Same data, different depth:
+Every turn renders at one of four layers. The data is unchanged; only the
+depth differs:
 
-| Layer | Shows                                                        |
-| ----- | ------------------------------------------------------------ |
-| L0    | "Worked for 5m 16s" + the ending summary                     |
-| L1    | Segment headlines + the rolling preview window               |
-| L2    | Full transcript: every headline, every tool row              |
-| L3    | One tool row opened: arguments, output, diff                 |
+| Layer | Shows                                            |
+| ----- | ------------------------------------------------ |
+| L0    | “Worked for 5m 16s” and the ending summary       |
+| L1    | Segment headlines and the rolling preview window |
+| L2    | Full transcript: every headline and tool row     |
+| L3    | One opened tool row: arguments, output, or diff  |
 
 Clicks walk down: L0 header → L1/L2, preview window → L2, tool row → L3.
 Collapse walks back up.
 
-## 3. Density is state, on two axes
+## 3. Density is state on two axes
 
-- **The setting** is the existing app-wide `conversationDensity` from
-  `@honk/shared/conversation-density` — an Effect schema with three runtime
-  values (legacy stored values migrate at decode). It picks the default layer
-  per phase:
+- The app-wide `conversationDensity` preference chooses the default layer per
+  phase:
 
-  | Value                            | While running | After settle |
-  | -------------------------------- | ------------- | ------------ |
-  | `compact-all-grouped` (Compact)  | L1            | L0           |
-  | `compact-ungrouped` (Balanced)   | L1            | L1           |
-  | `detailed` (Detailed)            | L2            | L2           |
+  | Value                           | While running | After settle |
+  | ------------------------------- | ------------- | ------------ |
+  | `compact-all-grouped` (Compact) | L1            | L0           |
+  | `compact-ungrouped` (Balanced)  | L1            | L1           |
+  | `detailed` (Detailed)           | L2            | L2           |
 
-- **The per-turn override** is written by clicking a turn's surfaces and wins
-  over the setting for that turn only.
+- A per-turn override, written by clicking that turn's surfaces, wins for
+  that turn only.
 
-Effective layer = `turnOverride ?? densityDefault(phase)`. That one line is
-the whole reconciliation. Even at `detailed`, L3 stays closed until clicked —
-density never auto-opens raw tool output.
+Effective layer is `turnOverride ?? densityDefault(phase)`. Even at Detailed,
+L3 remains closed until clicked; a preference never opens raw tool output.
+
+The Appearance settings panel and the transcript read the same app-settings
+store. Settings is a shell overlay, so opening or closing it does not unmount
+the active thread, clear a draft, interrupt streaming, or reset a per-turn
+override.
 
 ## 4. The grouping rule
 
-Only read-shaped work groups. Minimum two consecutive read-shaped calls form
-a group ("Read 3 files"). **Edits and shell commands never disappear into a
-group** — at every density they keep a visible row. This is the safety rule:
-anything that could change the world stays on screen.
+Only read-shaped work groups. At least two consecutive read-shaped calls form
+a group such as “Read 3 files”. **Edits and shell commands never disappear
+inside a group**: work that could change the world stays visible.
 
-There is exactly one classifier: core's `Tools.writesOf`, the same split the
-checkpoint attribution gate uses. `"none"` is read-shaped; `"declared"` and
-`"opaque"` are not — so an unknown tool (MCP, future built-ins) never groups,
-erring toward visible. As the harness grows read-only tools (grep, glob,
-fetch), they become groupable by joining the classifier, not by joining a
-transcript list.
+There is one classifier: core's `Tools.writesOf`, shared with checkpoint
+attribution. `none` is read-shaped; `declared` and `opaque` are not. An unknown
+tool therefore remains visible. New read-only built-ins become groupable by
+joining this classifier, not a transcript-specific list.
 
-## 5. The preview window
+## 5. Streaming and the preview window
 
-One surface with two states. It never unmounts:
+One status surface has two states and never unmounts:
 
-- **Running**: a fixed-height, one-line ticker under the current headline.
-  Shows the active tool as `action detail` ("bash pnpm vitest run …"),
-  shimmering. Labels swap **in place** — the window never grows, the layout
-  never shifts. While the model writes prose, the text streams **outside the
-  window** as ordinary transcript markdown, Cursor-style; the window holds
-  its last completed label. When the next block arrives the prose takes its
-  place — a tool call makes it the new segment's headline and the window
-  resumes with that tool's label; the end of the turn makes it the summary.
-  The ticker is the turn's single status organ: retry countdowns and
-  queued-prompt counts render here too.
+- **Running:** a fixed-height one-line ticker under the current headline. The
+  active tool appears as `action detail`, shimmering. Labels replace one
+  another in place so the window never grows. Assistant prose streams outside
+  the ticker as transcript markdown. The ticker keeps the last completed label
+  while prose arrives and also owns retry and queued-message status.
+- **Settled:** the same surface becomes “Worked for 5m 16s”, “Stopped”, or
+  “Canceled”. A failed turn collapses like a completed turn; its label tells
+  the truth.
 
-  A tool row shows its name exactly once: the step's `name` is the only name
-  source, and `detail` is a path or command extracted from the arguments —
-  never the tool's name repeated. (The old transcript projection copied the
-  result's `toolName` into a title and rendered "Read Read"; that path is
-  deleted and the shape makes it unexpressible.)
-- **Settled**: the same surface becomes the header — "Worked for 5m 16s",
-  or "Stopped" / "Canceled" when the run did not finish. A failed turn
-  collapses like a finished one; only the label tells the truth.
+Live Pi `message_update` events drive the in-progress assistant projection.
+Committed Pi session entries remain authoritative. Reload does not invent or
+reconstruct a partial assistant message; it reads the committed active branch,
+then live delivery resumes. Smoothness is a rendering concern, not a second
+transcript or a second transport protocol. Honk uses Pi's event shapes over
+Effect RPC's chunked stream and does not add a protobuf message layer.
 
-## 6. Motion rules
+A tool row gets its name from the step exactly once. Its detail is a path or
+command extracted from arguments, never the tool name repeated.
 
-- The ticker window is fixed height; only text moves. Outgoing label floats
-  up ~7px and fades; incoming rises in. ~220ms, ease-out.
-- **The ✓ beat**: when a tool finishes, its shimmer stops and a ✓ stamps for
-  ~260ms before the next label enters. Progress is shown, not implied.
-- Roll-ups happen inside the ticker: when reads cross the group minimum, the
-  label becomes the rolled line ("Read 3 files…").
-- Settling is a becoming, not a replacement: the ticker turns into the
-  duration header in place; the summary fades in.
-- Expansion animates height measured from content. Rows inside never animate
-  individually. Density flips are layout-stable: geometry is measured before
-  the flip, so text-variant changes cannot cause width or height jumps.
-- Under `prefers-reduced-motion`, swaps become instant and the shimmer
-  becomes static muted text.
+### Motion
 
-## 7. The composer contract
+- The ticker is fixed height. An outgoing label rises about 7px and fades; the
+  incoming label rises in over about 220ms with ease-out.
+- When a tool completes, shimmer stops and a check stamps briefly before the
+  next label arrives.
+- Read roll-ups happen inside the ticker.
+- Settling transforms the ticker into the duration header in place; the
+  summary fades in.
+- Expansion animates measured container height. Rows do not animate
+  independently.
+- Under `prefers-reduced-motion`, swaps are immediate and shimmer becomes
+  static muted text.
 
-How text leaves the composer, verbatim from Pi's own TUI (the reference
-implementation of chatting with this harness), translated to Honk surfaces.
+## 6. One message value
 
-### Sending
+Every user-authored chat value is:
 
-| User intent            | Verb       | Delivery                                        |
-| ---------------------- | ---------- | ----------------------------------------------- |
-| Send while idle        | `prompt`   | starts the turn                                 |
-| Send while running     | `steer`    | at the loop boundary — after the current batch of tool calls |
-| Queue for after the run | `followUp` | only after the agent finishes all work          |
+```ts
+interface ComposerMessage {
+  readonly text: string;
+  readonly images: readonly PromptImage[];
+}
+```
 
-The bindings are fixed, not a setting (accepted rule `composer-queues`:
-one enqueue behavior, never separate send-versus-queue modes):
+This exact value crosses the initial composer, thread composer, `prompt`,
+`steer`, `followUp`, queue projection, abort restoration, and edit flow. A
+message may contain text, images, or both; neither is refused. An image-only
+message is not padded with synthetic text.
 
-- **Enter always enqueues.** While idle the queue drains immediately, so
-  it feels like send; while a run is active the message queues as a
-  follow-up and the queue rows appear. Matches the composer's shipped hint
-  ("⏎ queues · ⌘⏎ sends now").
-- **⌘⏎ steers** — force-send into the running work. This deliberately
-  diverges from Pi TUI's Enter-steers default.
+Images are Pi prompt content, not a Honk attachment side channel. At the RPC
+boundary each image has non-empty base64 data and an `image/*` media type.
+Core adds Pi's `ImageContent` discriminant and passes the images through the
+public harness prompt options. Committed messages render images from Pi's
+stored user content, so reload, reconnect, and branch navigation cannot lose
+them. One message carries at most eight images; each image is at most 10 MiB
+before base64 encoding. The editor preflights those same limits before reading
+a file, while core's schema remains authoritative for every client.
 
-Shift+Enter stays newline. Streaming does not change the bindings — the
-verbs mean the same thing at every moment of a run.
+The editor owns its current `ComposerMessage`. Picker and paste add images;
+each thumbnail can be removed before send. File reads may finish out of order,
+but an older selection may never attach to a newer draft or edit intent. One
+unreadable file does not discard readable siblings.
 
-Separately from the verb choice, queue **delivery pacing** is Pi's own mode,
-`one-at-a-time` (default) or `all`, mirroring `steeringMode`/`followUpMode`.
+## 7. Sending, queues, and stopping
 
-### The queue is harness truth, not client state
+| User intent             | Pi verb    | Delivery                                  |
+| ----------------------- | ---------- | ----------------------------------------- |
+| Send while idle         | `prompt`   | Starts the turn                           |
+| Send during a run now   | `steer`    | At the next agent-loop boundary           |
+| Queue after current run | `followUp` | After the agent finishes its current work |
 
-Pi's `queue_update` event carries the full queue contents (steer, follow-up,
-next-turn). The composer renders queue rows from that event and keeps no
-shadow queue — a renderer reload cannot lose or duplicate queued messages,
-and the queued count in the preview window reads the same truth.
+Bindings are fixed:
 
-### Editing a queued message is recall, not in-place edit
+- **Enter enqueues.** While idle, the queue drains immediately and feels like
+  send. During a run it queues a follow-up and the queue tray appears.
+- **⌘Enter / Ctrl+Enter steers** into the running work.
+- **Shift+Enter** inserts a newline.
 
-Pi's rule, adopted whole: queued text is pulled **back into the composer** to
-change it — there is no in-queue editor. Two paths:
+Streaming never changes the bindings. Pi's `steeringMode` and `followUpMode`
+still own whether queued messages are delivered one at a time or all at once.
 
-- **Abort restores**: `abort()` returns the cleared steer and follow-up
-  messages (`AbortResult`), and the composer puts that text back in the
-  editor. Stopping never destroys something the user typed.
-- **Recall while running** (Pi TUI's Alt+Up, "Restore queued messages to
-  editor"): shipped TUI behavior at the pinned revision. The harness API it
-  uses is not visible in the 0.83 public typings — *verify in Pi's TUI
-  source when building recall in core*. Until then, recall rides the abort
-  path.
+### Queue truth and restoration
 
-"Stop and send" is therefore a composition, not a verb: abort → text
-restored → prompt.
+Pi's `queue_update` event carries complete steer, follow-up, and next-turn
+buckets. Honk projects each queued Pi user message back to the same
+`ComposerMessage`, including images, and keeps no shadow queue. Image-only rows
+therefore remain visible.
 
-### Editing a sent message opens a branch
+Queue editing is recall, not an in-row editor. `abort()` returns the messages
+Pi cleared. Honk combines their text and images and restores them to the
+ordinary reply editor. A rejected send likewise restores the exact initiating
+message. “Stop and send” is composition — abort, restore, then prompt — not a
+fourth harness verb.
 
-Pi's session is a tree, and both edit shapes are native:
+## 8. Editing a committed message
 
-- **In-place branch** (TUI `/tree`): navigate to the point before the edited
-  message and prompt the new text — a sibling branch in the same session.
-  This is the chat surface's "edit sent message".
-- **Fork** (TUI `/fork`): a new session file from a prior user message with
-  the prompt modified. A session-list operation, not a transcript one.
+Only an idle, committed user message is editable. Entering edit mode replaces
+the editor with that message's existing text and images. The user may retain,
+remove, paste, or pick images. The ordinary reply draft remains untouched
+behind the edit intent.
 
-### The active-path rule (core invariant)
+Saving uses only Pi's public tree and prompt APIs:
 
-The moment branching exists, every linear read must follow the **active
-branch**, not the whole tree: authoritative reloads read Pi's `getBranch()`,
-and the turn grammar, workspace trail, model record, and per-turn change
-pairing all walk that path. Checkpoints are keyed by entry id and are
-branch-agnostic by construction — a revert target stays valid across branch
-switches. Today's core reads `getEntries()` (the whole tree); that is
-correct only while no branching command is exposed, and switching to
-active-path reads is a prerequisite of `session.navigateTree`.
+```ts
+await harness.navigateTree(entryId, { summarize: false });
+await harness.prompt(text, { images });
+```
 
-Core commands this contract still owes: `session.abort` returning the
-cleared queue, queue-mode settings, `session.navigateTree`, and active-path
-reloads. `queue_update` already flows to clients through `session.events`.
+Pi selects the target message's parent and appends the revision as a sibling.
+The old branch remains in the session tree. Honk does not mutate a historical
+entry, rewrite JSONL, patch Pi, or maintain an edit overlay.
 
-## 8. Git actions in the conversation
+The edit lifecycle is lossless:
 
-A Git action ("Commit & Push", "Create Branch & Commit", …) is an agent turn
-the user starts with one click instead of typed text. Nothing about it is a
-second kind of message:
+- **Cancel** discards the edit intent and restores the untouched reply draft.
+- **Busy refusal or pre-prompt failure** keeps the edit text and images visible
+  and restores the previous active leaf when navigation had already moved it.
+- **Provider failure after the revised user entry commits** stays on the new
+  branch with Pi's failed assistant entry; it is not mistaken for a failed
+  navigation and rolled back.
+- **Stop during the revised run** aborts Pi's run without replacing the
+  ordinary reply draft.
+- **Success** exits edit mode. The authoritative active-branch state replaces
+  the transcript; no local splice guesses what Pi committed.
 
-- **One core command.** `session.gitAction` appends a `honk.git_action`
-  marker entry (`{action, files?}`) and prompts the harness with the
-  action's canonical instructions — server-side, in that order, in one
-  handler. The instruction text lives in core, so every client that names an
-  action sends the same words; the app owns only labels.
-- **The chip is a rendering, not an entry kind.** The transcript pairs the
-  marker with the user message that follows it and renders the pair as one
-  chip: the action label, the loading label while the paired turn runs, the
-  turn's outcome and receipt at settle. Expanding the chip shows the
-  canonical instruction text — the transcript never hides what the model
-  was told (core spec §3: what the model saw is what the surface shows).
-- **Failure renders itself.** A marker with no user message after it means
-  the model request failed and no work ran; the chip shows "didn't start".
-  No cleanup, no orphan state to reconcile.
-- **Idle-only.** A busy session is refused *before* anything is appended —
-  Pi buffers a running turn's user message until settlement, so a mid-run
-  marker would land before that message and pair with the wrong turn. The
-  action buttons disable while a run is active, a Git action never rides
-  steer or follow-up, and the chip's pairing stays a straight read of entry
-  order; the send-verb contract (§7) is untouched.
-- **The offer is chrome.** The button that starts an action (under a settled
-  turn's change receipt, or in a source-control surface) is interface
-  chrome like the composer — it exists nowhere in the transcript until
-  clicked, and then only as the real entries above.
+## 9. Active branch and reload
 
-The turn a chip starts is an ordinary turn: grammar, density, disclosure,
-and receipts apply unchanged.
+Every linear conversation read follows Pi's active branch through
+`getBranch()`, never the whole append log. Turn segmentation, visible messages,
+workspace trails, model records, and per-turn change pairing all walk that
+path. Checkpoints remain keyed by entry id and branch-agnostic.
 
-## 9. What this deletes
+Branch length is not the reload cursor. Reload atomically pairs:
 
-Permission and question trays (core has no mid-run asks), the subagent tray
-(Pi has no child sessions), and composer modes (Pi's knobs are model and
-thinking level). The old message/part turn model in `transcript-model` is
-replaced by the segment grammar above.
+- `entries`: the full active branch; and
+- `entrySeq`: the append-log position used for later tails.
+
+If the append log changes while the branch is read, core retries the pair.
+`session_tree` is an authoritative replacement signal: the client replaces its
+visible branch instead of appending it. This prevents an overlapping edit,
+reload, or reconnect from skipping an entry or mixing two branches.
+
+## 10. Git actions in the conversation
+
+A Git action is an ordinary agent turn started by a button rather than typed
+text:
+
+- One core command appends a `honk.git_action` marker and prompts the harness
+  with canonical instructions.
+- The transcript pairs the marker with the following user message and renders
+  one chip. Detailed disclosure shows exactly what the model received.
+- A marker without a following user message means the request did not start.
+- Git actions are idle-only because Pi buffers a running turn's user message;
+  allowing a mid-run marker would make pairing ambiguous.
+
+The resulting turn uses the same grammar, density, streaming, and receipts as
+every other turn.
+
+## 11. What this deliberately does not add
+
+- No Pi source edits, `node_modules` patches, forked agent loop, or copied TUI.
+- No Honk transcript, message tree, queue, branch, or protobuf mirror.
+- No attachment registry beside Pi messages.
+- No synthetic “running” transition before Pi reports one.
+- No global chat failure for a refusal owned by one button or composer action.
+- No permission or question trays: trusted workspaces run the capabilities core
+  constructed.
+- No composer modes beyond model, thinking level, and the fixed send verbs.

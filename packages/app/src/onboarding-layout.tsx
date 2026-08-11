@@ -75,7 +75,7 @@ const M_OUTER: Ring = { outer: 108, hole: 84, teeth: 32 }; // pitch 96
 const M_INNER: Ring = { outer: 56, hole: 40, teeth: 16 }; // pitch 48
 const L_RING: Ring = { outer: 156, hole: 132, teeth: 48 }; // pitch 144
 
-const VIEW = { w: 640, h: 800 } as const;
+const VIEW: { readonly w: number; readonly h: number } = { w: 640, h: 800 };
 
 // The large gear is the rightmost: its outer circle stops 96 in from the edge.
 const L_EDGE_INSET = 96;
@@ -151,10 +151,13 @@ export const TRAIN: { readonly s: Gear; readonly m: Gear; readonly l: Gear } = {
 };
 
 /** Which ring meshes with which, for tests: [gear, ring index] pairs. */
-export const MESHES = [
+type GearRing = readonly [gear: "s" | "m" | "l", ringIndex: number];
+type GearMesh = { readonly a: GearRing; readonly b: GearRing };
+
+export const MESHES: readonly GearMesh[] = [
   { a: ["m", 0], b: ["s", 0] },
   { a: ["m", 1], b: ["l", 0] },
-] as const;
+];
 
 // ---------------------------------------------------------------------------
 // Rendering

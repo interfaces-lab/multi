@@ -37,6 +37,11 @@
     "unresolved": "error"
   },
   "ignoreDependencies": ["bun"],
+  "ignore": [
+    "packages/mobile/babel.config.cjs",
+    "packages/ui/dev/index.css",
+    "tooling/scripts/evals/shared-control-chrome/**"
+  ],
   "ignoreIssues": {},
   "workspaces": {
     "packages/desktop": {
@@ -45,7 +50,8 @@
         "src/preload.ts",
         "scripts/**/*.mjs",
         "test/**/*.{ts,tsx}",
-        "tsdown.config.ts"
+        "tsdown.config.ts",
+        "electron-builder.config.ts"
       ],
       "project": ["src/**/*.{ts,tsx}", "scripts/**/*.mjs", "test/**/*.{ts,tsx}", "*.config.ts"]
     },

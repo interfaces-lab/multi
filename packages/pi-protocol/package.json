@@ -2,7 +2,7 @@
   "name": "@honk/pi-protocol",
   "version": "0.0.0",
   "private": true,
-  "description": "Pi's remote-session protocol schemas (@earendil-works/pi-protocol), vendored verbatim at a pinned upstream ref until Pi publishes the package to npm.",
+  "description": "Pi's remote-session protocol schemas (@earendil-works/pi-protocol), generated from a pinned upstream ref until Pi publishes the package to npm.",
   "type": "module",
   "exports": {
     "./schema": {
@@ -11,7 +11,7 @@
     }
   },
   "scripts": {
-    "generate": "node scripts/generate.ts",
+    "generate": "node scripts/generate.ts && oxfmt --write src/_generated",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest"

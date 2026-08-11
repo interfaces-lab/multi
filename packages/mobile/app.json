@@ -17,13 +17,13 @@
           "NSAllowsArbitraryLoads": false,
           "NSAllowsLocalNetworking": true
         },
-        "NSLocalNetworkUsageDescription": "Honk connects to your computer over your Wi-Fi network.",
+        "NSLocalNetworkUsageDescription": "Honk connects to your computer through Tailscale.",
         "ITSAppUsesNonExemptEncryption": false
       }
     },
     "android": {
       "package": "com.interfacesco.honk.mobile",
-      "permissions": ["android.permission.CAMERA", "android.permission.RECORD_AUDIO"]
+      "permissions": ["android.permission.CAMERA"]
     },
     "plugins": [
       "expo-router",
@@ -36,22 +36,7 @@
           "recordAudioAndroid": false
         }
       ],
-      [
-        "expo-image-picker",
-        {
-          "photosPermission": "Allow Honk to attach images to your task messages."
-        }
-      ],
-      "expo-image",
-      "react-native-enriched-markdown",
-      [
-        "expo-build-properties",
-        {
-          "android": {
-            "usesCleartextTraffic": true
-          }
-        }
-      ]
+      "react-native-enriched-markdown"
     ],
     "experiments": {
       "reactCompiler": true,

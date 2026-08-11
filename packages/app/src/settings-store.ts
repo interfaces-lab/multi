@@ -3,16 +3,7 @@
 import { useSyncExternalStore } from "react";
 import { useSyncExternalStoreWithSelector } from "use-sync-external-store/with-selector";
 
-export type SettingsSectionId =
-  | "general"
-  | "servers"
-  | "connections"
-  | "providers"
-  | "plugins"
-  | "rules"
-  | "tools"
-  | "hooks"
-  | "appearance";
+export type SettingsSectionId = "general" | "providers" | "tools" | "appearance";
 
 export type SettingsSnapshot = {
   readonly open: boolean;
@@ -84,7 +75,7 @@ export const actions = {
     }
     publish({ ...snapshot, section });
   },
-} as const;
+};
 
 function publish(next: SettingsSnapshot): void {
   if (next.open === snapshot.open && next.section === snapshot.section) {

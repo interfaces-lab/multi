@@ -1,6 +1,6 @@
-// Honk Core boot store, in the same shape as connection-store.ts: promises
-// live here so components stay effect-free, and surfaces read one stable
-// snapshot through useSyncExternalStore. `HonkClient` comes from @honk/core —
+// Honk Core boot store. Promises live here so components stay effect-free,
+// and surfaces read one stable snapshot through useSyncExternalStore.
+// `HonkClient` comes from @honk/core —
 // the same interface an in-process host hands out — so when the transport
 // changes (HTTP now, IPC per spec/core.md section 6) only the connect step
 // in this file changes.
@@ -10,7 +10,7 @@ import { useSyncExternalStore } from "react";
 import type { HonkClient } from "@honk/core";
 import { createHonkClient } from "@honk/core";
 
-import { getHonkCoreEndpoint } from "../desktop-bridge";
+import { getHonkCoreConnection } from "../desktop-bridge";
 
 export type CoreSnapshot =
   | { readonly status: "connecting" }
@@ -53,12 +53,12 @@ export function startHonkCore(): void {
   if (started) return;
   started = true;
   void (async () => {
-    const endpoint = await getHonkCoreEndpoint();
-    if (endpoint === null) {
+    const connection = await getHonkCoreConnection();
+    if (connection === null) {
       emit({ status: "unavailable" });
       return;
     }
-    const client = await createHonkClient({ url: endpoint.baseUrl });
+    const client = await createHonkClient(connection);
     emit({ status: "ready", client });
   })();
 }
@@ -76,8 +76,8 @@ export function requireHonkClient(): HonkClient {
 
 /** One readable line for a rejected core call: `code: message` when typed. */
 export function describeError(error: unknown): string {
-  if (typeof error === "object" && error !== null && "code" in error && "message" in error) {
-    return `${String((error as { code: unknown }).code)}: ${String((error as { message: unknown }).message)}`;
+  if (error instanceof Object && Reflect.has(error, "code") && Reflect.has(error, "message")) {
+    return `${String(Reflect.get(error, "code"))}: ${String(Reflect.get(error, "message"))}`;
   }
   return String(error);
 }

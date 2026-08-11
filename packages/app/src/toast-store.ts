@@ -1,8 +1,7 @@
 // Toast pipeline. Timers and visibility tracking live here, never in a component effect.
-// Toasts with threadKey render only for the active tab. Attention alerts omit threadKey so
-// backgrounded threads still surface.
+// Toasts with threadKey render only for the active chat route. Attention alerts omit
+// threadKey so backgrounded threads still surface.
 
-import { parseOpenCodeSessionKey } from "@honk/opencode";
 import { useSyncExternalStore } from "react";
 
 export type ToastType = "error" | "info" | "loading" | "success" | "warning";
@@ -22,7 +21,7 @@ export type ToastItem = {
   readonly copyableError?: string;
   /**
    * Thread-local feedback only. Viewport shows the toast only while this key is
-   * the active tab. Attention / cross-thread alerts omit this field so they
+   * the active route. Attention / cross-thread alerts omit this field so they
    * always render (parity: fix the backgrounded-attention filter bug).
    */
   readonly threadKey?: string;
@@ -159,15 +158,13 @@ function installVisibilityTracking(): void {
 /**
  * Thread-scoped toasts render only when their thread IS the active route
  * (thread-local feedback). Unscoped toasts (attention alerts) always render.
- * Call at display time so the viewport re-evaluates when the active tab changes.
+ * Call at display time so the viewport re-evaluates when the active route changes.
  */
-export function shouldRenderToast(toast: ToastItem, activeKey: string): boolean {
+export function shouldRenderToast(toast: ToastItem, activeSessionId: string | null): boolean {
   if (toast.threadKey === undefined) {
     return true;
   }
-  if (toast.threadKey === activeKey) return true;
-  const activeSession = parseOpenCodeSessionKey(activeKey);
-  return activeSession?.sessionID === toast.threadKey;
+  return toast.threadKey === activeSessionId;
 }
 
 export function subscribe(listener: () => void): () => void {

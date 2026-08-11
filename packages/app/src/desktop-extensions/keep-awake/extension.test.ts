@@ -1,7 +1,15 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { createHonkDesktopExtensionHost } from "../sdk";
+import { createHonkDesktopExtensionHost, type HonkDesktopTabs } from "../sdk";
 import { keepAwakeExtension } from "./extension";
+
+const stubTabs: HonkDesktopTabs = {
+  getSnapshot: () => ({ tabs: [], activeKey: "home" }),
+  subscribe: () => () => {},
+  activate: () => {},
+  close: () => {},
+  create: () => {},
+};
 
 function createStorage() {
   const values = new Map<string, string>();
@@ -19,15 +27,7 @@ function createHost(
 ) {
   return createHonkDesktopExtensionHost({
     storage,
-    tabs: {
-      getSnapshot: () => ({ tabs: [], activeKey: "home" }),
-      subscribe: () => () => {},
-      activate: () => {},
-      close: () => {},
-      create: () => {},
-      openDraft: () => {},
-    },
-    opencode: { client: () => null },
+    tabs: stubTabs,
     power: { setKeepAwake },
   });
 }

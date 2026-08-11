@@ -41,7 +41,7 @@ import {
   shellVars,
   spaceVars,
 } from "./tokens.stylex";
-import { Tooltip, TooltipProvider } from "./tooltip";
+import { Tooltip, TooltipProvider, type TooltipProps } from "./tooltip";
 
 // Local tab geometry. Promote to tokens only when a second consumer needs the same sizes.
 const AVATAR_STATUS_OFFSET = "-2px";
@@ -504,6 +504,9 @@ interface TabProps {
 interface SessionTabPreviewTooltipProps {
   readonly tab: ThreadTabDescriptor;
   readonly disabled?: boolean;
+  readonly side?: TooltipProps["side"];
+  readonly align?: TooltipProps["align"];
+  readonly sideOffset?: TooltipProps["sideOffset"];
   readonly children: React.ReactElement;
 }
 
@@ -526,6 +529,9 @@ function SessionTabPreviewProvider({
 function SessionTabPreviewTooltip({
   tab,
   disabled = false,
+  side = "bottom",
+  align = "start",
+  sideOffset = 6,
   children,
 }: SessionTabPreviewTooltipProps): React.ReactElement {
   if (tab.status === "draft") {
@@ -535,9 +541,9 @@ function SessionTabPreviewTooltip({
   return (
     <Tooltip
       label={<TabPreview tab={tab} />}
-      side="bottom"
-      align="start"
-      sideOffset={6}
+      side={side}
+      align={align}
+      sideOffset={sideOffset}
       delay={TAB_TOOLTIP_OPEN_DELAY_MS}
       closeDelay={0}
       disabled={disabled}

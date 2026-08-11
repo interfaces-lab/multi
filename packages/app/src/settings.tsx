@@ -1,23 +1,20 @@
 import * as stylex from "@stylexjs/stylex";
-import { Dialog, Icon, IconButton, ListRow, Separator, Text } from "@honk/ui";
+import { Dialog, Icon, IconButton, ListRow, Separator, Text, type Glyph } from "@honk/ui";
 import {
   IconBrush,
   IconCrossMedium,
   IconModelcontextprotocol,
   IconPeopleIdCard2,
-  IconPuzzle,
-  IconServer,
   IconSettingsGear2,
-  IconShieldCode,
-  IconUserKey,
-  IconWebhooks,
 } from "@honk/ui/icons";
 import { borderVars, colorVars, controlVars, spaceVars } from "@honk/ui/tokens.stylex";
 import * as React from "react";
 
-import { canManageDesktopRemoteHost } from "./desktop-bridge";
-import { SettingsPanelSkeleton } from "./settings-controls";
+import { SettingsAppearance } from "./settings-appearance";
+import { SettingsGeneral } from "./settings-general";
 import { SETTINGS_DIALOG_STYLE, SETTINGS_DIALOG_TITLE_STYLE } from "./settings-layout";
+import { SettingsMcp } from "./settings-mcp";
+import { SettingsProviders } from "./settings-providers";
 import {
   actions as settingsActions,
   useSettingsSelector,
@@ -26,7 +23,18 @@ import {
 
 // Groups are separated by a hairline rule, never by a text label — Cursor's rail has no group
 // headings, and the icons plus adjacency already carry the grouping.
-const SETTINGS_GROUPS = [
+type SettingsSection = {
+  readonly id: SettingsSectionId;
+  readonly label: string;
+  readonly icon: Glyph;
+};
+
+type SettingsGroup = {
+  readonly id: string;
+  readonly sections: readonly SettingsSection[];
+};
+
+const SETTINGS_GROUPS: readonly SettingsGroup[] = [
   {
     id: "preferences",
     sections: [
@@ -35,69 +43,26 @@ const SETTINGS_GROUPS = [
     ],
   },
   {
-    id: "connections",
-    sections: [
-      { id: "servers", label: "Servers", icon: IconServer },
-      { id: "connections", label: "Device access", icon: IconUserKey },
-      { id: "providers", label: "Accounts", icon: IconPeopleIdCard2 },
-    ],
+    id: "accounts",
+    sections: [{ id: "providers", label: "Accounts", icon: IconPeopleIdCard2 }],
   },
   {
-    id: "customization",
-    sections: [
-      { id: "plugins", label: "Plugins", icon: IconPuzzle },
-      { id: "rules", label: "Rules, Skills, Subagents", icon: IconShieldCode },
-      { id: "tools", label: "MCP servers", icon: IconModelcontextprotocol },
-      { id: "hooks", label: "Hooks", icon: IconWebhooks },
-    ],
+    id: "tools",
+    sections: [{ id: "tools", label: "MCP servers", icon: IconModelcontextprotocol }],
   },
-] as const satisfies readonly {
-  readonly id: string;
-  readonly sections: readonly {
-    readonly id: SettingsSectionId;
-    readonly label: string;
-    readonly icon: typeof IconSettingsGear2;
-  }[];
-}[];
+];
 
 function sectionLabelFor(id: SettingsSectionId): string {
-  const sections = SETTINGS_GROUPS.flatMap<{
-    readonly id: SettingsSectionId;
-    readonly label: string;
-    readonly icon: typeof IconSettingsGear2;
-  }>((group) => group.sections);
+  const sections = SETTINGS_GROUPS.flatMap((group) => group.sections);
   return sections.find((item) => item.id === id)?.label ?? "Settings";
 }
 
 const PANELS = {
-  general: React.lazy(() =>
-    import("./settings-general").then((module) => ({ default: module.SettingsGeneral })),
-  ),
-  servers: React.lazy(() =>
-    import("./settings-servers").then((module) => ({ default: module.SettingsServers })),
-  ),
-  connections: React.lazy(() =>
-    import("./settings-connections").then((module) => ({ default: module.SettingsConnections })),
-  ),
-  providers: React.lazy(() =>
-    import("./settings-providers").then((module) => ({ default: module.SettingsProviders })),
-  ),
-  plugins: React.lazy(() =>
-    import("./settings-plugins").then((module) => ({ default: module.SettingsPlugins })),
-  ),
-  rules: React.lazy(() =>
-    import("./settings-rules").then((module) => ({ default: module.SettingsRules })),
-  ),
-  tools: React.lazy(() =>
-    import("./settings-mcp").then((module) => ({ default: module.SettingsMcp })),
-  ),
-  hooks: React.lazy(() =>
-    import("./settings-hooks").then((module) => ({ default: module.SettingsHooks })),
-  ),
-  appearance: React.lazy(() =>
-    import("./settings-appearance").then((module) => ({ default: module.SettingsAppearance })),
-  ),
-} satisfies Record<SettingsSectionId, React.LazyExoticComponent<React.ComponentType>>;
+  general: SettingsGeneral,
+  providers: SettingsProviders,
+  tools: SettingsMcp,
+  appearance: SettingsAppearance,
+} satisfies Record<SettingsSectionId, React.ComponentType>;
 
 const SETTINGS_WIDE_MEDIA = "@media (min-width: 720px)";
 const SETTINGS_NAV_COMPACT_MAX_HEIGHT = "152px";
@@ -212,7 +177,10 @@ const styles = stylex.create({
     display: "flex",
     alignItems: "center",
     gap: spaceVars["--honk-space-gutter"],
-    paddingBlock: spaceVars["--honk-space-panel-pad"],
+    // The scroll region below owns the trailing pad instead. A control's ring and shadow paint
+    // outside its border box, so the region's first row needs padding above it or the scroll edge
+    // cuts them.
+    paddingBlockStart: spaceVars["--honk-space-panel-pad"],
     paddingInlineStart: spaceVars["--honk-space-panel-pad"],
     // In the wide arm the absolute close control overlays the header's end; compact places the
     // close over the nav strip instead, so the header needs no clearance there.
@@ -229,7 +197,7 @@ const styles = stylex.create({
     display: "flex",
     flexDirection: "column",
     overflowY: "auto",
-    paddingBlockEnd: spaceVars["--honk-space-panel-pad"],
+    paddingBlock: spaceVars["--honk-space-panel-pad"],
     paddingInlineStart: spaceVars["--honk-space-panel-pad"],
     paddingInlineEnd: {
       default: spaceVars["--honk-space-panel-pad"],
@@ -248,12 +216,7 @@ const styles = stylex.create({
 
 export function SettingsOverlay(): React.ReactElement {
   const open = useSettingsSelector((snapshot) => snapshot.open);
-  const requestedSection = useSettingsSelector((snapshot) => snapshot.section);
-  const desktopConnectionsAvailable = canManageDesktopRemoteHost();
-  const section =
-    requestedSection === "connections" && !desktopConnectionsAvailable
-      ? "servers"
-      : requestedSection;
+  const section = useSettingsSelector((snapshot) => snapshot.section);
   const activeSectionRef = React.useRef<HTMLButtonElement>(null);
   const Panel = PANELS[section];
 
@@ -288,7 +251,6 @@ export function SettingsOverlay(): React.ReactElement {
                   )}
                   <div {...stylex.props(styles.navGroup)}>
                     {group.sections.map((item) => {
-                      if (item.id === "connections" && !desktopConnectionsAvailable) return null;
                       const active = item.id === section;
                       return (
                         <ListRow
@@ -326,11 +288,7 @@ export function SettingsOverlay(): React.ReactElement {
             </header>
             <div key={section} {...stylex.props(styles.panelScroll)}>
               <div {...stylex.props(styles.panelColumn)}>
-                <React.Suspense
-                  fallback={<SettingsPanelSkeleton label={sectionLabelFor(section)} />}
-                >
-                  <Panel />
-                </React.Suspense>
+                <Panel />
               </div>
             </div>
           </div>

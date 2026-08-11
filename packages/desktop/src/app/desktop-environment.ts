@@ -23,7 +23,6 @@ export interface MakeDesktopEnvironmentInput {
   readonly appPath: string;
   readonly isPackaged: boolean;
   readonly resourcesPath: string;
-  readonly documentsDirectory: string;
   readonly runningUnderArm64Translation: boolean;
 }
 
@@ -43,12 +42,10 @@ export interface DesktopEnvironmentShape {
   readonly stateDir: string;
   readonly desktopSettingsPath: string;
   readonly clientSettingsPath: string;
-  readonly remoteHostStatePath: string;
   readonly serverSettingsPath: string;
   readonly logDir: string;
   readonly rootDir: string;
   readonly appRoot: string;
-  readonly backendCwd: string;
   readonly preloadPath: string;
   readonly appUpdateYmlPath: string;
   readonly devServerUrl: Option.Option<URL>;
@@ -93,10 +90,6 @@ export const resolveDesktopStaticDir = Effect.gen(function* () {
   return Option.fromNullishOr(candidates.find((_, index) => existing[index]));
 }).pipe(Effect.withSpan("desktop.environment.resolveStaticDir"));
 
-export function resolveDefaultBackendCwd(input: { readonly documentsDirectory: string }): string {
-  return input.documentsDirectory;
-}
-
 const makeDesktopEnvironment = Effect.fn("desktop.environment.make")(function* (
   input: MakeDesktopEnvironmentInput,
 ): Effect.fn.Return<DesktopEnvironmentShape, Config.ConfigError, Path.Path> {
@@ -114,9 +107,6 @@ const makeDesktopEnvironment = Effect.fn("desktop.environment.make")(function* (
         ? path.join(homeDirectory, "Library", "Application Support")
         : Option.getOrElse(config.xdgConfigHome, () => path.join(homeDirectory, ".config"));
   const baseDir = Option.getOrElse(config.honkHome, () => path.join(homeDirectory, ".honk"));
-  const defaultBackendCwd = resolveDefaultBackendCwd({
-    documentsDirectory: input.documentsDirectory,
-  });
   const branding = resolveDesktopAppBranding({
     isDevelopment,
   });
@@ -143,12 +133,10 @@ const makeDesktopEnvironment = Effect.fn("desktop.environment.make")(function* (
     stateDir,
     desktopSettingsPath: path.join(stateDir, "desktop-settings.json"),
     clientSettingsPath: path.join(stateDir, "client-settings.json"),
-    remoteHostStatePath: path.join(stateDir, "remote-host.json"),
     serverSettingsPath: path.join(stateDir, "settings.json"),
     logDir: path.join(stateDir, "logs"),
     rootDir,
     appRoot,
-    backendCwd: defaultBackendCwd,
     preloadPath: path.join(input.dirname, "../preload/index.js"),
     appUpdateYmlPath: input.isPackaged
       ? path.join(resourcesPath, "app-update.yml")

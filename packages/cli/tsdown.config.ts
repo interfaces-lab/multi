@@ -1,7 +1,6 @@
 import { defineConfig } from "tsdown";
 
 export default defineConfig({
-  // @honk/opencode is a private workspace package. Inline its host contract and
-  // generated plugin sources so the published CLI has no workspace dependency.
-  deps: { onlyBundle: ["@honk/opencode"] },
+  // @honk/core is a dev dependency, so tsdown inlines the private workspace
+  // package while leaving the CLI's published runtime dependencies external.
 });

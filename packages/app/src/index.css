@@ -177,7 +177,7 @@ input[type="range"]:disabled,
 
 /* Reading and workbench scrollports use a stable lane so content never changes width when it
  * starts overflowing. The platform scrollbar keeps native wheel, trackpad, keyboard, and assistive
- * behavior, while its visual treatment follows OpenCode's useful proportion: a narrow thumb inside
+ * behavior, while its visual treatment uses a narrow thumb inside
  * a wider transparent hit lane, hidden until the user is interacting with that surface. */
 [data-honk-scrollport] {
   scrollbar-gutter: stable;

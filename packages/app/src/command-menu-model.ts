@@ -1,14 +1,14 @@
 // Fixed command-menu ranking: Start-new → threads → commands. A command-verb match may float
 // Commands within its band. Nothing else reorders bands. Dev entries stay out of SHIPPING_COMMANDS.
 
-import { openCodeSessionKey, openCodeSessionRef } from "@honk/opencode";
+import type { Session } from "@honk/core/session";
+import { basename } from "@honk/shared/paths";
 
-import type { TabStatus } from "./tab-store";
 import type { CommandMenuDoor, CommandMenuSubmenuFrame } from "./command-menu-store";
-import type { AppSessionSummary } from "./open-code-view";
 
-/** Session inventory row used by the command menu. */
-export type CommandMenuThread = AppSessionSummary;
+/** Core session inventory row used by the command menu. */
+export type CommandMenuThread = Session.SessionSummary;
+export type CommandMenuThreadStatus = "idle" | "working";
 
 export type CommandMenuItemKind = "start-new" | "thread" | "command" | "submenu" | "header";
 
@@ -28,9 +28,9 @@ export type CommandMenuItem =
   | {
       readonly kind: "thread";
       readonly id: string;
-      readonly sessionKey: string;
+      readonly sessionId: string;
       readonly title: string;
-      readonly status: TabStatus;
+      readonly status: CommandMenuThreadStatus;
       readonly searchTerms: readonly string[];
     }
   | {
@@ -53,7 +53,6 @@ export type CommandMenuItem =
 export type CommandMenuCommandId =
   | "new-thread"
   | "open-settings"
-  | "copy-session-debug-info"
   | "replay-onboarding"
   | "toggle-performance-monitor";
 
@@ -96,17 +95,6 @@ export const SHIPPING_COMMANDS: readonly ShippingCommand[] = Object.freeze([
 /** Development-only commands. Callers decide whether the current runtime may expose them. */
 export const DEVELOPMENT_COMMANDS: readonly ShippingCommand[] = Object.freeze([
   {
-    id: "copy-session-debug-info",
-    title: "Copy active session debug info",
-    searchTerms: Object.freeze([
-      "copy session debug info",
-      "copy session id",
-      "copy chat id",
-      "debug chat loading",
-    ]),
-    run: "copy-session-debug-info",
-  },
-  {
     id: "replay-onboarding",
     title: "Replay onboarding",
     searchTerms: Object.freeze(["replay onboarding", "show onboarding", "first run", "setup"]),
@@ -129,48 +117,17 @@ export const DEVELOPMENT_COMMANDS: readonly ShippingCommand[] = Object.freeze([
 
 export const RECENT_THREAD_LIMIT = 12;
 
-/** Map OpenCode ThreadSummary onto tab status. */
-export function tabStatusFromSummary(summary: CommandMenuThread): TabStatus {
-  if (summary.needsAttention) {
-    return "needs-you";
-  }
-  switch (summary.status) {
-    case "running":
-      return "working";
-    case "failed":
-      return "failed";
-    case "idle":
-      return "idle";
-    default: {
-      const _exhaustive: never = summary.status;
-      return _exhaustive;
-    }
-  }
+/** Core's phase vocabulary folded onto the status-dot one: any open run is working. */
+function threadStatus(thread: CommandMenuThread): CommandMenuThreadStatus {
+  return thread.phase === "idle" ? "idle" : "working";
 }
 
-/** StatusDot tone for a tab status. */
-export function statusDotTone(status: TabStatus): "ok" | "warn" | "err" | "neutral" | "draft" {
-  switch (status) {
-    case "done":
-      return "ok";
-    case "needs-you":
-      return "warn";
-    case "failed":
-      return "err";
-    case "draft":
-      return "draft";
-    case "idle":
-    case "working":
-      return "neutral";
-    default: {
-      const _exhaustive: never = status;
-      return _exhaustive;
-    }
-  }
+export function statusDotTone(_status: CommandMenuThreadStatus): "neutral" {
+  return "neutral";
 }
 
-export function statusDotPulse(status: TabStatus): boolean {
-  return status === "needs-you";
+export function statusDotPulse(status: CommandMenuThreadStatus): boolean {
+  return status === "working";
 }
 
 export type RankCommandMenuInput = {
@@ -210,8 +167,9 @@ export function rankCommandMenuItems(input: RankCommandMenuInput): readonly Comm
   const startNew = commands.find((c) => c.isStartNew);
   const commandBand = commands.filter((c) => !c.isStartNew);
 
+  // Delegation-owned sessions stay out of top-level lists.
   const activeThreads = input.threads
-    .filter((thread) => thread.archivedAt === null && thread.parentSessionId === null)
+    .filter((thread) => thread.delegation === undefined)
     .slice()
     .sort((a, b) => {
       const byUpdated = b.updatedAt.localeCompare(a.updatedAt);
@@ -314,15 +272,23 @@ function buildList(input: {
 }
 
 function threadItem(thread: CommandMenuThread): CommandMenuItem {
-  const sessionKey = openCodeSessionKey(openCodeSessionRef(thread.server, thread.id));
   return {
     kind: "thread",
-    id: sessionKey,
-    sessionKey,
-    title: thread.title,
-    status: tabStatusFromSummary(thread),
-    searchTerms: [thread.title, String(thread.id)],
+    id: thread.id,
+    sessionId: thread.id,
+    title: thread.title ?? basename(thread.directory),
+    status: threadStatus(thread),
+    searchTerms: threadSearchTerms(thread),
   };
+}
+
+function threadSearchTerms(thread: CommandMenuThread): readonly string[] {
+  return [
+    ...(thread.title === undefined ? [] : [thread.title]),
+    basename(thread.directory),
+    thread.directory,
+    String(thread.id),
+  ];
 }
 
 function filterAndRankThreads(
@@ -337,7 +303,7 @@ function filterAndRankThreads(
     .map((thread, index) => ({
       thread,
       index,
-      rank: bestFieldRank([thread.title, String(thread.id)], needle),
+      rank: bestFieldRank(threadSearchTerms(thread), needle),
     }))
     .filter((entry) => entry.rank > Number.NEGATIVE_INFINITY)
     .sort((a, b) => b.rank - a.rank || a.index - b.index)

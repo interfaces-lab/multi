@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$repo_root"
+
+step() {
+  printf '\n[orb setup] %s\n' "$1"
+}
+
+step "installing mise when the base image does not provide it"
+if ! command -v mise >/dev/null 2>&1; then
+  if ! command -v curl >/dev/null 2>&1; then
+    apt-get update
+    apt-get install -y --no-install-recommends ca-certificates curl
+    rm -rf /var/lib/apt/lists/*
+  fi
+  curl https://mise.run | sh
+  export PATH="$HOME/.local/bin:$PATH"
+fi
+
+mise_bin="$(command -v mise)"
+
+step "installing the pinned Node and pnpm toolchain"
+"$mise_bin" install
+eval "$("$mise_bin" activate bash)"
+
+profile_marker="# honk orb toolchain"
+if ! grep -Fqx "$profile_marker" "$HOME/.bash_profile" 2>/dev/null; then
+  cat >> "$HOME/.bash_profile" <<EOF
+
+$profile_marker
+if [[ "\${PWD}" == "$repo_root" || "\${PWD}" == "$repo_root/"* ]]; then
+  eval "\$("$mise_bin" activate bash)"
+fi
+EOF
+fi
+
+step "installing workspace dependencies from pnpm-lock.yaml"
+pnpm install --frozen-lockfile
+
+step "verifying the toolchain from a fresh login shell"
+env -i HOME="$HOME" PATH="/usr/local/bin:/usr/bin:/bin" /bin/bash -lc \
+  "cd '$repo_root' && node --version && pnpm --version"
+
+step "complete"

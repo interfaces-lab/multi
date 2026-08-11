@@ -1,34 +1,71 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi, type Mock } from "vitest";
 
-const mocks = vi.hoisted(() => ({
-  appSettings: {
-    alertSoundSelection: "custom" as "custom" | "ready",
-    alertSoundsEnabled: true,
-    customAlertSoundFileName: "done.mp3" as string | null,
-    notifyWhenThreadFinishes: true,
-    notifyWhenThreadNeedsInput: true,
-  },
-  add: vi.fn(),
-  addAttention: vi.fn(),
-  clearCustomAlertSound: vi.fn(),
-  play: vi.fn(),
-  playAlertSound: vi.fn(() => Promise.resolve("custom")),
-  subscribeWatch: vi.fn<(listener: () => void) => () => void>(() => () => {}),
-  tabSnapshot: { activeKey: null as string | null },
-  watchSnapshot: { state: null as unknown, status: "ready" },
-}));
+import type { Session } from "@honk/core/session";
 
-vi.mock("@honk/opencode", () => ({
-  openCodeSessionKey: (value: string) => value,
-  openCodeSessionRef: (_server: string, id: string) => id,
+import type { AlertSoundSelection } from "./alert-sound-model";
+import type { InventoryState } from "./chat/inventory-model";
+import { sessionSummary } from "./test-fixtures";
+import type { AddToastInput } from "./toast-store";
+
+interface NotificationSettings {
+  alertSoundSelection: AlertSoundSelection;
+  alertSoundsEnabled: boolean;
+  customAlertSoundFileName: string | null;
+  notifyWhenThreadFinishes: boolean;
+  notifyWhenThreadNeedsInput: boolean;
+}
+
+interface NotificationMocks {
+  readonly appSettings: NotificationSettings;
+  readonly add: Mock<(input: AddToastInput) => void>;
+  readonly clearCustomAlertSound: Mock<() => void>;
+  readonly navigate: Mock<(input: unknown) => void>;
+  pathname: string;
+  readonly playAlertSound: Mock<
+    (
+      selection: AlertSoundSelection,
+      customFileName: string | null,
+    ) => Promise<"built-in" | "custom" | "unavailable">
+  >;
+  readonly retainInventory: Mock<() => () => void>;
+  readonly subscribeInventory: Mock<(listener: () => void) => () => void>;
+  inventory: InventoryState;
+  readonly showSystemThreadNotification: Mock<(input: unknown) => void>;
+}
+
+const mocks = vi.hoisted(
+  (): NotificationMocks => ({
+    appSettings: {
+      alertSoundSelection: "custom",
+      alertSoundsEnabled: true,
+      customAlertSoundFileName: "done.mp3",
+      notifyWhenThreadFinishes: true,
+      notifyWhenThreadNeedsInput: true,
+    },
+    add: vi.fn(),
+    clearCustomAlertSound: vi.fn(),
+    navigate: vi.fn(),
+    pathname: "/",
+    playAlertSound: vi.fn(() => Promise.resolve("custom")),
+    retainInventory: vi.fn(() => () => {}),
+    subscribeInventory: vi.fn<(listener: () => void) => () => void>(() => () => {}),
+    inventory: { status: "ready", sessions: [], error: null },
+    showSystemThreadNotification: vi.fn(),
+  }),
+);
+
+vi.mock("@honk/shared/paths", () => ({
+  basename: (value: string) => value.split("/").at(-1) ?? value,
 }));
-vi.mock("@honk/shared/paths", () => ({ basename: (value: string) => value }));
-vi.mock("cuelume", () => ({ play: mocks.play }));
 vi.mock("./app-settings-store", () => ({
   actions: { clearCustomAlertSound: mocks.clearCustomAlertSound },
   getSnapshot: () => mocks.appSettings,
 }));
-vi.mock("./command-menu-model", () => ({ tabStatusFromSummary: () => "done" }));
+vi.mock("./chat/inventory-store", () => ({
+  getInventorySnapshot: () => mocks.inventory,
+  retainInventory: mocks.retainInventory,
+  subscribeInventory: mocks.subscribeInventory,
+}));
 vi.mock("./completion-sound", () => ({
   installAlertSoundPlayback: () => () => {},
   playAlertSound: mocks.playAlertSound,
@@ -39,152 +76,142 @@ vi.mock("./desktop-bridge", () => ({
 }));
 vi.mock("./notification-permission", () => ({
   isWindowForeground: () => true,
-  showSystemThreadNotification: vi.fn(),
+  showSystemThreadNotification: mocks.showSystemThreadNotification,
 }));
-vi.mock("./tab-store", () => ({
-  actions: { open: vi.fn() },
-  getSnapshot: () => mocks.tabSnapshot,
+vi.mock("./router", () => ({
+  router: {
+    navigate: mocks.navigate,
+    get state() {
+      return { location: { pathname: mocks.pathname } };
+    },
+  },
 }));
 vi.mock("./toast-store", () => ({
-  actions: { add: mocks.add, addAttention: mocks.addAttention },
-}));
-vi.mock("./watch-registry", () => ({
-  getSessionInventoryWatchSnapshot: () => mocks.watchSnapshot,
-  subscribeSessionInventoryWatch: mocks.subscribeWatch,
+  actions: { add: mocks.add },
 }));
 
-const summary = {
-  id: "thread-1",
-  server: "local",
-  title: "Build feature",
-  status: "running",
-  needsAttention: false,
-  worktree: { path: "/repo" },
-};
+const summary = sessionSummary({
+  id: "ses_1",
+  workspaceId: "ws_1",
+  directory: "/repo/feature",
+  title: "Fix tab title generation",
+  createdAt: "2026-08-07T00:00:00.000Z",
+  phase: "turn",
+  updatedAt: "2026-08-07T00:00:00.000Z",
+});
+
+function emitFrame(sessions: readonly Session.SessionSummary[]): void {
+  mocks.inventory = { status: "ready", sessions: [...sessions], error: null };
+  mocks.subscribeInventory.mock.calls[0]?.[0]();
+}
 
 afterEach(async () => {
   const notifications = await import("./thread-notifications");
   notifications.uninstallThreadNotifications();
   mocks.add.mockClear();
-  mocks.addAttention.mockClear();
   mocks.clearCustomAlertSound.mockClear();
-  mocks.play.mockClear();
+  mocks.navigate.mockClear();
   mocks.playAlertSound.mockClear();
-  mocks.subscribeWatch.mockClear();
+  mocks.retainInventory.mockClear();
+  mocks.subscribeInventory.mockClear();
+  mocks.showSystemThreadNotification.mockClear();
   mocks.appSettings.alertSoundSelection = "custom";
   mocks.appSettings.alertSoundsEnabled = true;
   mocks.appSettings.customAlertSoundFileName = "done.mp3";
-  mocks.tabSnapshot.activeKey = null;
-  mocks.watchSnapshot.state = null;
+  mocks.pathname = "/";
+  mocks.inventory = { status: "ready", sessions: [], error: null };
 });
 
-describe("thread alert sounds", () => {
-  it("uses the canonical needs-you wording for attention", async () => {
-    mocks.watchSnapshot.state = { rootSessions: [summary] };
+describe("thread completion alerts", () => {
+  it("toasts when a working session settles, with an Open action to its chat route", async () => {
+    mocks.inventory = { status: "ready", sessions: [summary], error: null };
     const notifications = await import("./thread-notifications");
     notifications.installThreadNotifications();
 
-    mocks.watchSnapshot.state = {
-      rootSessions: [{ ...summary, needsAttention: true }],
-    };
-    mocks.subscribeWatch.mock.calls[0]?.[0]();
-
-    expect(mocks.addAttention).toHaveBeenCalledWith(
-      expect.objectContaining({
-        title: "Needs you — Build feature",
-        description: "Needs you.",
-      }),
-    );
-  });
-
-  it("plays the selected sound for inactive completion and attention transitions", async () => {
-    mocks.watchSnapshot.state = { rootSessions: [summary] };
-    const notifications = await import("./thread-notifications");
-    notifications.installThreadNotifications();
-
-    mocks.watchSnapshot.state = {
-      rootSessions: [{ ...summary, status: "idle" }],
-    };
-    mocks.subscribeWatch.mock.calls[0]?.[0]();
-    mocks.watchSnapshot.state = {
-      rootSessions: [{ ...summary, status: "idle", needsAttention: true }],
-    };
-    mocks.subscribeWatch.mock.calls[0]?.[0]();
-
-    expect(mocks.playAlertSound).toHaveBeenNthCalledWith(1, "custom", "done.mp3");
-    expect(mocks.playAlertSound).toHaveBeenNthCalledWith(2, "custom", "done.mp3");
-  });
-
-  it("raises one needs-you alert when completion and attention arrive together", async () => {
-    mocks.watchSnapshot.state = { rootSessions: [summary] };
-    const notifications = await import("./thread-notifications");
-    notifications.installThreadNotifications();
-
-    mocks.watchSnapshot.state = {
-      rootSessions: [{ ...summary, status: "idle", needsAttention: true }],
-    };
-    mocks.subscribeWatch.mock.calls[0]?.[0]();
-
-    expect(mocks.addAttention).toHaveBeenCalledOnce();
-    expect(mocks.add).not.toHaveBeenCalled();
-    expect(mocks.playAlertSound).toHaveBeenCalledOnce();
-  });
-
-  it("reports a failure once instead of also raising needs-you feedback", async () => {
-    mocks.watchSnapshot.state = { rootSessions: [summary] };
-    const notifications = await import("./thread-notifications");
-    notifications.installThreadNotifications();
-
-    mocks.watchSnapshot.state = {
-      rootSessions: [{ ...summary, status: "failed", needsAttention: true }],
-    };
-    mocks.subscribeWatch.mock.calls[0]?.[0]();
+    emitFrame([{ ...summary, phase: "idle" }]);
 
     expect(mocks.add).toHaveBeenCalledWith(
       expect.objectContaining({
-        type: "error",
-        title: "Failed — Build feature",
-        description: "Stopped with an error.",
+        type: "info",
+        title: "Fix tab title generation",
+        description: "Finished working.",
       }),
     );
-    expect(mocks.addAttention).not.toHaveBeenCalled();
-    expect(mocks.play).toHaveBeenCalledWith("error");
+    expect(mocks.playAlertSound).toHaveBeenCalledWith("custom", "done.mp3");
+
+    const action = mocks.add.mock.calls[0]?.[0]?.action;
+    if (action === undefined) throw new Error("Expected completion toast action");
+    action.run();
+    expect(mocks.navigate).toHaveBeenCalledWith({
+      to: "/chat/$sessionId",
+      params: { sessionId: "ses_1" },
+    });
+  });
+
+  it("retains the inventory watch for the install lifetime", async () => {
+    const notifications = await import("./thread-notifications");
+    notifications.installThreadNotifications();
+    expect(mocks.retainInventory).toHaveBeenCalledOnce();
+  });
+
+  it("seeds on first sighting so a full inventory boot does not alert", async () => {
+    const notifications = await import("./thread-notifications");
+    notifications.installThreadNotifications();
+
+    emitFrame([{ ...summary, phase: "idle" }]);
+    expect(mocks.add).not.toHaveBeenCalled();
+  });
+
+  it("stays silent for the session whose chat route is open", async () => {
+    mocks.inventory = { status: "ready", sessions: [summary], error: null };
+    const notifications = await import("./thread-notifications");
+    notifications.installThreadNotifications();
+
+    mocks.pathname = "/chat/ses_1";
+    emitFrame([{ ...summary, phase: "idle" }]);
+
+    expect(mocks.add).not.toHaveBeenCalled();
     expect(mocks.playAlertSound).not.toHaveBeenCalled();
   });
 
-  it("respects the sound preference and inactive-thread gate", async () => {
-    mocks.watchSnapshot.state = { rootSessions: [summary] };
+  it("ignores delegation-owned sessions", async () => {
+    const delegated = sessionSummary({
+      id: "ses_child",
+      workspaceId: summary.workspaceId,
+      directory: summary.directory,
+      ...(summary.title === undefined ? {} : { title: summary.title }),
+      createdAt: summary.createdAt,
+      phase: summary.phase,
+      updatedAt: summary.updatedAt,
+      delegation: { delegationOf: "ses_1", role: "sidekick" },
+    });
+    mocks.inventory = { status: "ready", sessions: [delegated], error: null };
+    const notifications = await import("./thread-notifications");
+    notifications.installThreadNotifications();
+
+    emitFrame([{ ...delegated, phase: "idle" }]);
+    expect(mocks.add).not.toHaveBeenCalled();
+  });
+
+  it("respects the sound preference", async () => {
+    mocks.inventory = { status: "ready", sessions: [summary], error: null };
     const notifications = await import("./thread-notifications");
     notifications.installThreadNotifications();
 
     mocks.appSettings.alertSoundsEnabled = false;
-    mocks.watchSnapshot.state = { rootSessions: [{ ...summary, status: "idle" }] };
-    mocks.subscribeWatch.mock.calls[0]?.[0]();
-    expect(mocks.playAlertSound).not.toHaveBeenCalled();
+    emitFrame([{ ...summary, phase: "idle" }]);
 
-    mocks.watchSnapshot.state = { rootSessions: [summary] };
-    mocks.subscribeWatch.mock.calls[0]?.[0]();
-    mocks.watchSnapshot.state = { rootSessions: [{ ...summary, status: "failed" }] };
-    mocks.subscribeWatch.mock.calls[0]?.[0]();
-    expect(mocks.play).not.toHaveBeenCalled();
-
-    mocks.appSettings.alertSoundsEnabled = true;
-    mocks.tabSnapshot.activeKey = summary.id;
-    mocks.watchSnapshot.state = {
-      rootSessions: [{ ...summary, status: "idle", needsAttention: true }],
-    };
-    mocks.subscribeWatch.mock.calls[0]?.[0]();
+    expect(mocks.add).toHaveBeenCalledOnce();
     expect(mocks.playAlertSound).not.toHaveBeenCalled();
   });
 
   it("clears stale custom metadata when playback falls back to the built-in sound", async () => {
     mocks.playAlertSound.mockResolvedValueOnce("built-in");
-    mocks.watchSnapshot.state = { rootSessions: [summary] };
+    mocks.inventory = { status: "ready", sessions: [summary], error: null };
     const notifications = await import("./thread-notifications");
     notifications.installThreadNotifications();
 
-    mocks.watchSnapshot.state = { rootSessions: [{ ...summary, status: "idle" }] };
-    mocks.subscribeWatch.mock.calls[0]?.[0]();
+    emitFrame([{ ...summary, phase: "idle" }]);
     await Promise.resolve();
 
     expect(mocks.clearCustomAlertSound).toHaveBeenCalledOnce();

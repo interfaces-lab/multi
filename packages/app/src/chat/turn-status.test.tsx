@@ -1,19 +1,41 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
-import { formatWorkedFor, settledLabel, tickerText, TurnStatus } from "./turn-status";
+import {
+  formatWorkedFor,
+  PLANNING_REVEAL_MS,
+  PLANNING_SLOW_MS,
+  settledLabel,
+  tickerText,
+  TurnStatus,
+} from "./turn-status";
+import type { TickerState } from "./chat-model";
 
 describe("ticker text", () => {
   it("names each ticker state, holding the window while prose streams", () => {
-    expect(tickerText({ kind: "planning" })).toBe("Planning next move");
-    expect(tickerText({ kind: "step", name: "bash", detail: "pnpm vitest run" })).toBe(
-      "bash pnpm vitest run",
+    expect(tickerText({ kind: "planning", since: null })).toBe("Planning next move");
+    expect(tickerText({ kind: "step", verb: "Running", detail: "pnpm vitest run" })).toBe(
+      "Running pnpm vitest run",
     );
-    expect(tickerText({ kind: "step", name: "todo_write", detail: null })).toBe("todo_write");
+    expect(tickerText({ kind: "step", verb: "Planned", detail: null })).toBe("Planned");
     expect(tickerText({ kind: "rollup", count: 3 })).toBe("Read 3 files");
     // Writing streams outside the window; idle has nothing to say. Both hold.
     expect(tickerText({ kind: "writing" })).toBeNull();
     expect(tickerText({ kind: "idle" })).toBeNull();
+  });
+
+  it("a planning pause earns its label only once it is a pause", () => {
+    const planning: TickerState = { kind: "planning", since: 0 };
+    expect(tickerText(planning, 0)).toBeNull();
+    expect(tickerText(planning, PLANNING_REVEAL_MS - 1)).toBeNull();
+    expect(tickerText(planning, PLANNING_REVEAL_MS)).toBe("Planning next move");
+  });
+
+  it("a long wait becomes the news, with its own clock", () => {
+    const planning: TickerState = { kind: "planning", since: 0 };
+    expect(tickerText(planning, PLANNING_SLOW_MS - 1)).toBe("Planning next move");
+    expect(tickerText(planning, PLANNING_SLOW_MS)).toBe("Still working · 15s");
+    expect(tickerText(planning, 78_000)).toBe("Still working · 1m 18s");
   });
 });
 
@@ -36,7 +58,12 @@ describe("settled label", () => {
 describe("the status surface", () => {
   it("renders the running ticker as a live status region", () => {
     const html = renderToStaticMarkup(
-      <TurnStatus phase="running" ticker={{ kind: "planning" }} outcome="done" durationMs={null} />,
+      <TurnStatus
+        phase="running"
+        ticker={{ kind: "planning", since: null }}
+        outcome="done"
+        durationMs={null}
+      />,
     );
     expect(html).toContain('role="status"');
     expect(html).toContain("Planning next move");

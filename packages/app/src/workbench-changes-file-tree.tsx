@@ -1,5 +1,5 @@
 import * as stylex from "@stylexjs/stylex";
-import type { OpenCodeVcsFileStatus } from "@honk/opencode";
+import type { Git } from "@honk/core";
 import { Checkbox, Icon, IconButton, Text } from "@honk/ui";
 import {
   IconArrowRotateCounterClockwise,
@@ -23,12 +23,12 @@ import * as React from "react";
 // The upstream port drove @pierre/trees through a local Tree/useTreeModel wrapper
 // plus Tailwind. Both are gone under the StyleX-only seam, and @pierre/trees renders
 // its own preact DOM that StyleX cannot reach, so this is a first-party folder-grouped
-// collapsible tree over the same OpenCodeVcsFileStatus rows.
+// collapsible tree over the same Git.FileChange rows.
 
 type FileNode = {
   readonly kind: "file";
   readonly name: string;
-  readonly file: OpenCodeVcsFileStatus;
+  readonly file: Git.FileChange;
 };
 
 type DirNode = {
@@ -55,7 +55,7 @@ function createDir(name: string, path: string): DirNode {
   return { kind: "dir", name, path, segments: [name], dirs: new Map(), files: [] };
 }
 
-function buildTree(files: readonly OpenCodeVcsFileStatus[]): DirNode {
+function buildTree(files: readonly Git.FileChange[]): DirNode {
   const root = createDir("", "");
   for (const file of files) {
     const normalized = normalizePathSeparators(file.file);
@@ -100,7 +100,7 @@ function sortedChildren(dir: DirNode): readonly TreeNode[] {
   return [...dirs, ...leaves];
 }
 
-function fileStatusGlyph(status: OpenCodeVcsFileStatus["status"]): "A" | "D" | "M" {
+function fileStatusGlyph(status: Git.ChangeStatus): "A" | "D" | "M" {
   switch (status) {
     case "added":
       return "A";
@@ -286,7 +286,7 @@ const styles = stylex.create({
   },
 });
 
-function statusColorStyle(status: OpenCodeVcsFileStatus["status"]) {
+function statusColorStyle(status: Git.ChangeStatus) {
   if (status === "added") return styles.statusAdded;
   if (status === "deleted") return styles.statusDeleted;
   return styles.statusModified;
@@ -483,7 +483,7 @@ function WorkbenchChangesFileTree({
   onSelect,
   fileActions,
 }: {
-  readonly files: readonly OpenCodeVcsFileStatus[];
+  readonly files: readonly Git.FileChange[];
   readonly selectedPath: string | null;
   readonly onSelect: (path: string) => void;
   readonly fileActions: FileRowActions;

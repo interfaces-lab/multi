@@ -1,10 +1,4 @@
-import {
-  DESKTOP_REMOTE_NAME_MAX_LENGTH,
-  DesktopThemeSchema,
-  type DesktopServerExposureConfiguration,
-  type DesktopServerExposureMode,
-  type DesktopTheme,
-} from "@honk/shared/desktop-api";
+import { DesktopThemeSchema, type DesktopTheme } from "@honk/shared/desktop-api";
 import { fromLenientJson } from "@honk/shared/schema-json";
 import * as Context from "effect/Context";
 import * as Data from "effect/Data";
@@ -20,11 +14,9 @@ import * as SynchronizedRef from "effect/SynchronizedRef";
 import * as DesktopEnvironment from "../app/desktop-environment";
 
 export interface DesktopSettings {
-  readonly serverExposureMode: DesktopServerExposureMode;
-  readonly serverPublicUrl: string | null;
-  readonly remoteHostName: string | null;
   readonly themeSource: DesktopTheme;
   readonly hasCompletedOnboarding: boolean;
+  readonly tailscaleRemoteAccessEnabled: boolean;
   readonly lastBackendPort?: number;
 }
 
@@ -34,22 +26,18 @@ export interface DesktopSettingsChange {
 }
 
 export const DEFAULT_DESKTOP_SETTINGS: DesktopSettings = {
-  serverExposureMode: "local-only",
-  serverPublicUrl: null,
-  remoteHostName: null,
   themeSource: "system",
   hasCompletedOnboarding: false,
+  tailscaleRemoteAccessEnabled: false,
 };
 
+// Decoded permissively because the file on disk may have been written by another
+// build. Unknown fields must not fail the whole document and reset every
+// unrelated setting.
 const DesktopSettingsDocument = Schema.Struct({
-  // Decoded permissively because the file on disk may have been written by another build. A mode
-  // this build does not know must degrade to local-only below, not fail the whole document and
-  // reset every unrelated setting. The IPC contract keeps the strict literal union.
-  serverExposureMode: Schema.optionalKey(Schema.String),
-  serverPublicUrl: Schema.optionalKey(Schema.NullOr(Schema.String)),
-  remoteHostName: Schema.optionalKey(Schema.NullOr(Schema.String)),
   themeSource: Schema.optionalKey(DesktopThemeSchema),
   hasCompletedOnboarding: Schema.optionalKey(Schema.Boolean),
+  tailscaleRemoteAccessEnabled: Schema.optionalKey(Schema.Boolean),
   lastBackendPort: Schema.optionalKey(Schema.Number),
 });
 
@@ -76,17 +64,14 @@ export class DesktopSettingsWriteError extends Data.TaggedError("DesktopSettings
 export interface DesktopAppSettingsShape {
   readonly load: Effect.Effect<DesktopSettings>;
   readonly get: Effect.Effect<DesktopSettings>;
-  readonly setServerExposure: (
-    input: DesktopServerExposureConfiguration,
-  ) => Effect.Effect<DesktopSettingsChange, DesktopSettingsWriteError>;
-  readonly setRemoteHostName: (
-    name: string | null,
-  ) => Effect.Effect<DesktopSettingsChange, DesktopSettingsWriteError>;
   readonly setThemeSource: (
     theme: DesktopTheme,
   ) => Effect.Effect<DesktopSettingsChange, DesktopSettingsWriteError>;
   readonly setLastBackendPort: (
     port: number,
+  ) => Effect.Effect<DesktopSettingsChange, DesktopSettingsWriteError>;
+  readonly setTailscaleRemoteAccessEnabled: (
+    enabled: boolean,
   ) => Effect.Effect<DesktopSettingsChange, DesktopSettingsWriteError>;
   readonly completeOnboarding: Effect.Effect<DesktopSettingsChange, DesktopSettingsWriteError>;
 }
@@ -106,19 +91,9 @@ export function normalizeDesktopSettingsDocument(
 ): DesktopSettings {
   const lastBackendPort = parsed.lastBackendPort;
   return {
-    serverExposureMode:
-      parsed.serverExposureMode === "network-accessible" ||
-      parsed.serverExposureMode === "tailscale" ||
-      parsed.serverExposureMode === "tunnel"
-        ? parsed.serverExposureMode
-        : "local-only",
-    serverPublicUrl:
-      typeof parsed.serverPublicUrl === "string" && parsed.serverPublicUrl.trim().length > 0
-        ? parsed.serverPublicUrl.trim()
-        : null,
-    remoteHostName: normalizeDesktopRemoteHostName(parsed.remoteHostName),
     themeSource: parsed.themeSource ?? "system",
     hasCompletedOnboarding: parsed.hasCompletedOnboarding === true,
+    tailscaleRemoteAccessEnabled: parsed.tailscaleRemoteAccessEnabled === true,
     ...(typeof lastBackendPort === "number" &&
     Number.isInteger(lastBackendPort) &&
     lastBackendPort >= 1 &&
@@ -128,34 +103,20 @@ export function normalizeDesktopSettingsDocument(
   };
 }
 
-export function normalizeDesktopRemoteHostName(value: unknown): string | null {
-  if (typeof value !== "string") return null;
-  const normalized = value.trim();
-  return normalized.length > 0 && normalized.length <= DESKTOP_REMOTE_NAME_MAX_LENGTH
-    ? normalized
-    : null;
-}
-
 function toDesktopSettingsDocument(
   settings: DesktopSettings,
   defaults: DesktopSettings,
 ): DesktopSettingsDocument {
   const document: Mutable<DesktopSettingsDocument> = {};
 
-  if (settings.serverExposureMode !== defaults.serverExposureMode) {
-    document.serverExposureMode = settings.serverExposureMode;
-  }
-  if (settings.serverPublicUrl !== defaults.serverPublicUrl) {
-    document.serverPublicUrl = settings.serverPublicUrl;
-  }
-  if (settings.remoteHostName !== defaults.remoteHostName) {
-    document.remoteHostName = settings.remoteHostName;
-  }
   if (settings.themeSource !== defaults.themeSource) {
     document.themeSource = settings.themeSource;
   }
   if (settings.hasCompletedOnboarding !== defaults.hasCompletedOnboarding) {
     document.hasCompletedOnboarding = settings.hasCompletedOnboarding;
+  }
+  if (settings.tailscaleRemoteAccessEnabled !== defaults.tailscaleRemoteAccessEnabled) {
+    document.tailscaleRemoteAccessEnabled = settings.tailscaleRemoteAccessEnabled;
   }
   if (
     settings.lastBackendPort !== undefined &&
@@ -164,23 +125,6 @@ function toDesktopSettingsDocument(
     document.lastBackendPort = settings.lastBackendPort;
   }
   return document;
-}
-
-function setServerExposure(
-  settings: DesktopSettings,
-  input: DesktopServerExposureConfiguration,
-): DesktopSettings {
-  // Modes other than network-accessible ignore the custom address; keep it so switching back
-  // does not make the user retype it.
-  const serverPublicUrl =
-    input.mode === "network-accessible" ? input.publicUrl : settings.serverPublicUrl;
-  return settings.serverExposureMode === input.mode && settings.serverPublicUrl === serverPublicUrl
-    ? settings
-    : { ...settings, serverExposureMode: input.mode, serverPublicUrl };
-}
-
-function setRemoteHostName(settings: DesktopSettings, name: string | null): DesktopSettings {
-  return settings.remoteHostName === name ? settings : { ...settings, remoteHostName: name };
 }
 
 function setThemeSource(settings: DesktopSettings, requestedTheme: DesktopTheme): DesktopSettings {
@@ -199,6 +143,15 @@ function setLastBackendPort(settings: DesktopSettings, requestedPort: number): D
         ...settings,
         lastBackendPort: requestedPort,
       };
+}
+
+function setTailscaleRemoteAccessEnabled(
+  settings: DesktopSettings,
+  enabled: boolean,
+): DesktopSettings {
+  return settings.tailscaleRemoteAccessEnabled === enabled
+    ? settings
+    : { ...settings, tailscaleRemoteAccessEnabled: enabled };
 }
 
 function completeOnboarding(settings: DesktopSettings): DesktopSettings {
@@ -289,16 +242,6 @@ export const layer = Layer.effect(
         );
         return yield* SynchronizedRef.setAndGet(settingsRef, settings);
       }).pipe(Effect.withSpan("desktop.settings.load")),
-      setServerExposure: (input) =>
-        persist((settings) => setServerExposure(settings, input)).pipe(
-          Effect.withSpan("desktop.settings.setServerExposure", {
-            attributes: { mode: input.mode },
-          }),
-        ),
-      setRemoteHostName: (name) =>
-        persist((settings) => setRemoteHostName(settings, name)).pipe(
-          Effect.withSpan("desktop.settings.setRemoteHostName"),
-        ),
       setThemeSource: (theme) =>
         persist((settings) => setThemeSource(settings, theme)).pipe(
           Effect.withSpan("desktop.settings.setThemeSource", { attributes: { theme } }),
@@ -306,6 +249,12 @@ export const layer = Layer.effect(
       setLastBackendPort: (port) =>
         persist((settings) => setLastBackendPort(settings, port)).pipe(
           Effect.withSpan("desktop.settings.setLastBackendPort", { attributes: { port } }),
+        ),
+      setTailscaleRemoteAccessEnabled: (enabled) =>
+        persist((settings) => setTailscaleRemoteAccessEnabled(settings, enabled)).pipe(
+          Effect.withSpan("desktop.settings.setTailscaleRemoteAccessEnabled", {
+            attributes: { enabled },
+          }),
         ),
       completeOnboarding: persist(completeOnboarding).pipe(
         Effect.withSpan("desktop.settings.completeOnboarding"),
@@ -334,10 +283,10 @@ export const layerTest = (initialSettings: DesktopSettings = DEFAULT_DESKTOP_SET
       return DesktopAppSettings.of({
         get: SynchronizedRef.get(settingsRef),
         load: SynchronizedRef.get(settingsRef),
-        setServerExposure: (input) => update((settings) => setServerExposure(settings, input)),
-        setRemoteHostName: (name) => update((settings) => setRemoteHostName(settings, name)),
         setThemeSource: (theme) => update((settings) => setThemeSource(settings, theme)),
         setLastBackendPort: (port) => update((settings) => setLastBackendPort(settings, port)),
+        setTailscaleRemoteAccessEnabled: (enabled) =>
+          update((settings) => setTailscaleRemoteAccessEnabled(settings, enabled)),
         completeOnboarding: update(completeOnboarding),
       });
     }),

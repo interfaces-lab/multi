@@ -45,8 +45,12 @@
  */
 
 export * from "./contract";
+export * from "./delegation";
+export * from "./fusion";
 export * from "./git-actions";
 export * from "./service";
+export * from "./subagents";
+export * from "./title";
 
 // oxlint-disable-next-line import/no-self-import -- spec/effect.md self-reexport pattern; star imports are banned for consumers.
 export * as Session from ".";

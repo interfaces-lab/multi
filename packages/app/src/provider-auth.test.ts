@@ -1,265 +1,312 @@
-import type {
-  OpenCodeClient,
-  OpenCodeProviderApi,
-  OpenCodeProviderAuthMethod,
-  OpenCodeProviderInventory,
-} from "@honk/opencode";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import type { HonkClient } from "@honk/core";
+import type { Models } from "@honk/core/models";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
-  createProviderAuthCoordinator,
-  isProviderAuthPromptVisible,
-  nextProviderAuthPromptIndex,
+  createProviderAuthStore,
+  INITIAL_PROVIDER_AUTH_STATE,
+  reduceProviderAuth,
+  type ProviderAuthEvent,
 } from "./provider-auth";
 
-const conditionalMethod = {
-  id: "browser",
-  type: "oauth",
-  label: "Sign in",
-  prompts: [
-    {
-      type: "select",
-      key: "account",
+const { refreshCatalog } = vi.hoisted(() => ({
+  refreshCatalog: vi.fn(() => Promise.resolve()),
+}));
+
+vi.mock("./chat/model-catalog", () => ({ refreshCatalog }));
+
+beforeEach(() => {
+  refreshCatalog.mockClear();
+});
+
+function play(events: readonly ProviderAuthEvent[], from = INITIAL_PROVIDER_AUTH_STATE) {
+  return events.reduce(reduceProviderAuth, from);
+}
+
+const openUrl: Models.LoginEvent = { kind: "open_url", url: "https://auth.example.test" };
+const progress: Models.LoginEvent = { kind: "progress", message: "Waiting for the browser…" };
+const prompt: Models.LoginEvent = {
+  kind: "prompt",
+  promptId: "prompt_1",
+  promptType: "manual_code",
+  message: "Paste the code",
+};
+
+describe("reduceProviderAuth", () => {
+  it("accumulates notice frames in arrival order", () => {
+    const state = play([
+      { type: "begin-oauth", providerId: "anthropic" },
+      { type: "login-frame", frame: openUrl },
+      { type: "login-frame", frame: progress },
+    ]);
+    expect(state.flow).toMatchObject({
+      kind: "oauth",
+      notices: [openUrl, progress],
+      prompt: null,
+    });
+  });
+
+  it("replaces a pending prompt with the newest prompt frame", () => {
+    const second: Models.LoginEvent = {
+      kind: "prompt",
+      promptId: "prompt_2",
+      promptType: "select",
       message: "Choose an account",
-      options: [
-        { label: "Personal", value: "personal" },
-        { label: "Team", value: "team" },
-      ],
-    },
-    {
-      type: "text",
-      key: "organization",
-      message: "Organization",
-      when: { key: "account", op: "eq", value: "team" },
-    },
-    {
-      type: "text",
-      key: "nickname",
-      message: "Nickname",
-      when: { key: "account", op: "neq", value: "team" },
-    },
-  ],
-} satisfies OpenCodeProviderAuthMethod;
+      options: [{ id: "personal", label: "Personal" }],
+    };
+    const state = play([
+      { type: "begin-oauth", providerId: "anthropic" },
+      { type: "login-frame", frame: prompt },
+      { type: "login-frame", frame: second },
+    ]);
+    expect(state.flow).toMatchObject({ kind: "oauth", prompt: second });
+  });
 
-function inventory(openAiConnected: boolean, openCodeConnected = false): OpenCodeProviderInventory {
-  return [
-    {
-      id: "openai",
-      name: "OpenAI",
-      methods: [conditionalMethod, { type: "key", label: "API key" }],
-      connections: openAiConnected
-        ? [{ type: "credential", id: "cred_openai", label: "Codex" }]
-        : [],
-    },
-    {
-      id: "opencode",
-      name: "OpenCode",
-      methods: [{ type: "key", label: "API key" }],
-      connections: openCodeConnected
-        ? [{ type: "credential", id: "cred_opencode", label: "OpenCode" }]
-        : [],
-    },
-  ];
+  it("closes the flow on the done frame", () => {
+    const state = play([
+      { type: "begin-oauth", providerId: "anthropic" },
+      { type: "login-frame", frame: openUrl },
+      { type: "login-frame", frame: { kind: "done" } },
+    ]);
+    expect(state.flow).toBeNull();
+  });
+
+  it("voids a pending prompt when the stream ends without done", () => {
+    const state = play([
+      { type: "begin-oauth", providerId: "anthropic" },
+      { type: "login-frame", frame: prompt },
+      { type: "login-ended" },
+    ]);
+    expect(state.flow).toBeNull();
+  });
+
+  it("only clears the prompt the answer settled, never a successor", () => {
+    const second: Models.LoginEvent = {
+      kind: "prompt",
+      promptId: "prompt_2",
+      promptType: "text",
+      message: "One more thing",
+    };
+    const base = [
+      { type: "begin-oauth", providerId: "anthropic" },
+      { type: "login-frame", frame: prompt },
+      { type: "answer-sent" },
+    ] satisfies readonly ProviderAuthEvent[];
+    const settled = play([...base, { type: "answer-settled", promptId: "prompt_1" }]);
+    expect(settled.flow).toMatchObject({ kind: "oauth", prompt: null });
+    // The next prompt frame beat the answer's response: it must survive.
+    const raced = play([
+      ...base,
+      { type: "login-frame", frame: second },
+      { type: "answer-settled", promptId: "prompt_1" },
+    ]);
+    expect(raced.flow).toMatchObject({ kind: "oauth", prompt: second });
+  });
+
+  it("ignores begin events while a flow is active", () => {
+    const oauth = play([{ type: "begin-oauth", providerId: "anthropic" }]);
+    expect(play([{ type: "begin-api-key", providerId: "openai" }], oauth)).toBe(oauth);
+    expect(play([{ type: "begin-oauth", providerId: "openai" }], oauth)).toBe(oauth);
+    expect(play([{ type: "begin-sign-out", providerId: "openai" }], oauth)).toBe(oauth);
+  });
+
+  it("keeps the api-key form open after a failed save", () => {
+    const state = play([
+      { type: "begin-api-key", providerId: "openai" },
+      { type: "api-key-saving" },
+      { type: "failed", message: "models.credential_failed: nope" },
+    ]);
+    expect(state.flow).toEqual({ kind: "api-key", providerId: "openai", saving: false });
+    expect(state.error).toBe("models.credential_failed: nope");
+  });
+
+  it("clears the flow and error on cancel", () => {
+    const state = play([
+      { type: "begin-api-key", providerId: "openai" },
+      { type: "failed", message: "boom" },
+      { type: "cancel" },
+    ]);
+    expect(state.flow).toBeNull();
+    expect(state.error).toBeNull();
+  });
+});
+
+// A push-driven login stream: the test controls when frames arrive and sees
+// whether the store cancelled via `return`.
+interface LoginStreamController {
+  readonly iterable: AsyncIterable<Models.LoginEvent>;
+  readonly wasReturned: () => boolean;
+  readonly push: (frame: Models.LoginEvent) => void;
+  readonly end: () => void;
 }
 
-function fakeClient(overrides: Partial<OpenCodeProviderApi> = {}): OpenCodeClient {
-  const providers: OpenCodeProviderApi = {
-    list: vi.fn().mockResolvedValue(inventory(false)),
-    connectOauth: vi.fn().mockResolvedValue({
-      attemptID: "attempt_1",
-      url: "https://auth.example.test",
-      mode: "code",
-      instructions: "Paste the code",
-      time: { created: 1, expires: 2 },
-    }),
-    oauthStatus: vi.fn().mockResolvedValue({
-      status: "complete",
-      time: { created: 1, expires: 2 },
-    }),
-    completeOauth: vi.fn().mockResolvedValue(undefined),
-    cancelOauth: vi.fn().mockResolvedValue(undefined),
-    setApiKey: vi.fn().mockResolvedValue(undefined),
-    removeCredential: vi.fn().mockResolvedValue(undefined),
-    ...overrides,
+function loginStream(): LoginStreamController {
+  let done = false;
+  let returned = false;
+  const buffered: Models.LoginEvent[] = [];
+  let wake: (() => void) | null = null;
+  const notify = () => {
+    wake?.();
+    wake = null;
   };
-  return { providers } as OpenCodeClient;
+  const iterable: AsyncIterable<Models.LoginEvent> = {
+    [Symbol.asyncIterator]() {
+      return {
+        async next(): Promise<IteratorResult<Models.LoginEvent>> {
+          while (buffered.length === 0 && !done) {
+            await new Promise<void>((resolve) => {
+              wake = resolve;
+            });
+          }
+          const frame = buffered.shift();
+          if (frame !== undefined) return { value: frame, done: false };
+          return { value: undefined, done: true };
+        },
+        async return(): Promise<IteratorResult<Models.LoginEvent>> {
+          done = true;
+          returned = true;
+          notify();
+          return { value: undefined, done: true };
+        },
+      };
+    },
+  };
+  return {
+    iterable,
+    wasReturned: () => returned,
+    push(frame: Models.LoginEvent) {
+      buffered.push(frame);
+      notify();
+    },
+    end() {
+      done = true;
+      notify();
+    },
+  };
 }
 
-function deferred<T>(): {
-  readonly promise: Promise<T>;
-  readonly resolve: (value: T) => void;
-} {
-  let resolve!: (value: T) => void;
-  const promise = new Promise<T>((next) => {
-    resolve = next;
-  });
-  return { promise, resolve };
+function fakeClient(stream: LoginStreamController) {
+  const models = {
+    list: vi.fn(() => Promise.resolve({ providers: [] })),
+    setCredential: vi.fn(() => Promise.resolve(undefined)),
+    deleteCredential: vi.fn(() => Promise.resolve(undefined)),
+    answerLogin: vi.fn(() => Promise.resolve(undefined)),
+    login: vi.fn(() => stream.iterable),
+  } satisfies HonkClient["models"];
+  return { client: { models }, models };
 }
 
-describe("provider auth prompts", () => {
-  it("skips prompts whose conditions do not match", () => {
-    expect(isProviderAuthPromptVisible(conditionalMethod.prompts[1]!, {})).toBe(false);
-    expect(nextProviderAuthPromptIndex(conditionalMethod, 1, { account: "team" })).toBe(1);
-    expect(nextProviderAuthPromptIndex(conditionalMethod, 2, { account: "team" })).toBeNull();
-    expect(nextProviderAuthPromptIndex(conditionalMethod, 1, { account: "personal" })).toBe(2);
-  });
-});
+describe("createProviderAuthStore", () => {
+  it("refreshes the shared catalog after the done frame, without its own list", async () => {
+    const stream = loginStream();
+    const { client, models } = fakeClient(stream);
+    const store = createProviderAuthStore(client);
 
-describe("provider auth coordinator", () => {
-  it("deduplicates concurrent inventory refreshes", async () => {
-    const pending = deferred<OpenCodeProviderInventory>();
-    const list = vi.fn().mockReturnValue(pending.promise);
-    const coordinator = createProviderAuthCoordinator(fakeClient({ list }));
-    const first = coordinator.start();
-    const second = coordinator.refresh();
-    expect(first).toBe(second);
-    pending.resolve(inventory(false));
-    await first;
-    expect(list).toHaveBeenCalledOnce();
-  });
-
-  it("passes prompt inputs and the V2 method ID into an OAuth attempt", async () => {
-    const connectOauth = vi.fn().mockResolvedValue({
-      attemptID: "attempt_1",
-      url: "https://auth.example.test",
-      mode: "code",
-      instructions: "Paste the code",
-      time: { created: 1, expires: 2 },
+    store.beginOauth("anthropic");
+    stream.push(openUrl);
+    stream.push({ kind: "done" });
+    await vi.waitFor(() => {
+      expect(refreshCatalog).toHaveBeenCalledTimes(1);
     });
-    const openUrl = vi.fn().mockResolvedValue(undefined);
-    const coordinator = createProviderAuthCoordinator(fakeClient({ connectOauth }), openUrl);
-    await coordinator.startOpenAi();
-    await coordinator.chooseOpenAiMethod("browser");
-    await coordinator.submitOpenAiPrompt("team");
-    await coordinator.submitOpenAiPrompt("acme");
-    expect(connectOauth).toHaveBeenCalledWith("openai", "browser", {
-      account: "team",
-      organization: "acme",
+    expect(models.list).not.toHaveBeenCalled();
+    expect(store.getState().flow).toBeNull();
+  });
+
+  it("saveCredential stores the key, refreshes the catalog, and rejects to the caller", async () => {
+    const stream = loginStream();
+    const { client, models } = fakeClient(stream);
+    const store = createProviderAuthStore(client);
+
+    await store.saveCredential("deepseek", "sk-test");
+    expect(models.setCredential).toHaveBeenCalledWith({ providerId: "deepseek", key: "sk-test" });
+    expect(refreshCatalog).toHaveBeenCalledTimes(1);
+
+    models.setCredential.mockRejectedValueOnce(new Error("bad key"));
+    await expect(store.saveCredential("deepseek", "sk-bad")).rejects.toThrow("bad key");
+    // The dialog owns the failure line; nothing refreshed behind it.
+    expect(refreshCatalog).toHaveBeenCalledTimes(1);
+  });
+
+  it("releasing the last owner ends the live stream and resets to the initial state", async () => {
+    const stream = loginStream();
+    const { client } = fakeClient(stream);
+    const store = createProviderAuthStore(client);
+    const release = store.retain();
+
+    store.beginOauth("anthropic");
+    stream.push(prompt);
+    await vi.waitFor(() => {
+      expect(store.getState().flow).toMatchObject({ kind: "oauth", prompt });
     });
-    expect(openUrl).toHaveBeenCalledWith("https://auth.example.test");
-  });
 
-  it("completes code OAuth by attempt ID", async () => {
-    const completeOauth = vi.fn().mockResolvedValue(undefined);
-    const list = vi.fn().mockResolvedValueOnce(inventory(false)).mockResolvedValue(inventory(true));
-    const coordinator = createProviderAuthCoordinator(
-      fakeClient({ completeOauth, list }),
-      vi.fn().mockResolvedValue(undefined),
-    );
-    await coordinator.startOpenAi();
-    await coordinator.chooseOpenAiMethod("browser");
-    await coordinator.submitOpenAiPrompt("team");
-    await coordinator.submitOpenAiPrompt("acme");
-    await coordinator.submitOpenAiCode("  callback-code  ");
-    expect(completeOauth).toHaveBeenCalledWith("attempt_1", "callback-code");
-    expect(coordinator.getSnapshot().openAiConnected).toBe(true);
-  });
-
-  it("stores keys against the V2 integration IDs", async () => {
-    const setApiKey = vi.fn().mockResolvedValue(undefined);
-    const list = vi
-      .fn()
-      .mockResolvedValueOnce(inventory(false))
-      .mockResolvedValueOnce(inventory(true))
-      .mockResolvedValueOnce(inventory(true))
-      .mockResolvedValue(inventory(true, true));
-    const coordinator = createProviderAuthCoordinator(fakeClient({ setApiKey, list }));
-    await coordinator.startOpenAi();
-    await coordinator.chooseOpenAiMethod("key");
-    await coordinator.submitOpenAiApiKey("  openai-secret  ");
-    await coordinator.startOpenCodeGo();
-    await coordinator.submitOpenCodeGoApiKey("  opencode-secret  ");
-    expect(setApiKey).toHaveBeenNthCalledWith(1, "openai", "openai-secret");
-    expect(setApiKey).toHaveBeenNthCalledWith(2, "opencode", "opencode-secret");
-  });
-
-  it("populates claudeConnected from the injected probe and re-reads on refresh", async () => {
-    const readClaudeConnected = vi.fn().mockResolvedValueOnce(false).mockResolvedValue(true);
-    const coordinator = createProviderAuthCoordinator(
-      fakeClient(),
-      vi.fn().mockResolvedValue(undefined),
-      readClaudeConnected,
-    );
-    await coordinator.start();
-    expect(coordinator.getSnapshot().claudeConnected).toBe(false);
-    await coordinator.refresh();
-    expect(coordinator.getSnapshot().claudeConnected).toBe(true);
-  });
-
-  it("re-probes only claude on refreshClaude, leaving phase and inventory alone", async () => {
-    const list = vi.fn().mockResolvedValue(inventory(false));
-    const readClaudeConnected = vi.fn().mockResolvedValueOnce(false).mockResolvedValue(true);
-    const coordinator = createProviderAuthCoordinator(
-      fakeClient({ list }),
-      vi.fn().mockResolvedValue(undefined),
-      readClaudeConnected,
-    );
-    await coordinator.start();
-    expect(coordinator.getSnapshot().claudeConnected).toBe(false);
-    await coordinator.refreshClaude();
-    expect(coordinator.getSnapshot().claudeConnected).toBe(true);
-    expect(coordinator.getSnapshot().phase).toBe("ready");
-    expect(list).toHaveBeenCalledOnce();
-  });
-
-  it("keeps claudeConnected null when the probe rejects", async () => {
-    const coordinator = createProviderAuthCoordinator(
-      fakeClient(),
-      vi.fn().mockResolvedValue(undefined),
-      vi.fn().mockRejectedValue(new Error("bridge gone")),
-    );
-    await coordinator.start();
-    expect(coordinator.getSnapshot().phase).toBe("ready");
-    expect(coordinator.getSnapshot().claudeConnected).toBeNull();
-  });
-
-  it("publishes the claude probe even when the inventory fetch fails", async () => {
-    const list = vi.fn().mockRejectedValue(new Error("sidecar not ready"));
-    const coordinator = createProviderAuthCoordinator(
-      fakeClient({ list }),
-      vi.fn().mockResolvedValue(undefined),
-      vi.fn().mockResolvedValue(true),
-    );
-    await coordinator.start();
-    expect(coordinator.getSnapshot().claudeConnected).toBe(true);
-    expect(coordinator.getSnapshot().phase).toBe("ready");
-    expect(coordinator.getSnapshot().errorMessage).toBe("sidecar not ready");
-  });
-
-  it("removes the V2 credential exposed by the integration", async () => {
-    const removeCredential = vi.fn().mockResolvedValue(undefined);
-    const list = vi.fn().mockResolvedValueOnce(inventory(true)).mockResolvedValue(inventory(false));
-    const coordinator = createProviderAuthCoordinator(fakeClient({ removeCredential, list }));
-    await coordinator.start();
-    await coordinator.disconnectOpenAi();
-    expect(removeCredential).toHaveBeenCalledWith("cred_openai");
-    expect(coordinator.getSnapshot().openAiConnected).toBe(false);
-  });
-});
-
-describe("default claude probe", () => {
-  afterEach(() => vi.unstubAllGlobals());
-
-  it("maps the desktop bridge status into claudeConnected", async () => {
-    vi.stubGlobal("window", {
-      desktopBridge: { getClaudeAuthStatus: vi.fn().mockResolvedValue("connected") },
+    release();
+    expect(store.getState()).toEqual(INITIAL_PROVIDER_AUTH_STATE);
+    await vi.waitFor(() => {
+      expect(stream.wasReturned()).toBe(true);
     });
-    const coordinator = createProviderAuthCoordinator(fakeClient());
-    await coordinator.start();
-    expect(coordinator.getSnapshot().claudeConnected).toBe(true);
+    // Release is idempotent: StrictMode may invoke a cleanup it already ran.
+    release();
+    expect(store.getState()).toEqual(INITIAL_PROVIDER_AUTH_STATE);
   });
 
-  it("treats an unknown probe result and a missing bridge as null", async () => {
-    vi.stubGlobal("window", {
-      desktopBridge: { getClaudeAuthStatus: vi.fn().mockResolvedValue("unknown") },
-    });
-    const unknown = createProviderAuthCoordinator(fakeClient());
-    await unknown.start();
-    expect(unknown.getSnapshot().claudeConnected).toBeNull();
+  it("re-retaining after release reactivates the store for a fresh flow", async () => {
+    const first = loginStream();
+    const { client, models } = fakeClient(first);
+    const store = createProviderAuthStore(client);
 
-    vi.stubGlobal("window", {});
-    const web = createProviderAuthCoordinator(fakeClient());
-    await web.start();
-    expect(web.getSnapshot().claudeConnected).toBeNull();
+    // StrictMode's mount → cleanup → remount on the same store instance.
+    store.retain()();
+    const release = store.retain();
+
+    const second = loginStream();
+    models.login.mockReturnValueOnce(second.iterable);
+    store.beginOauth("anthropic");
+    second.push(openUrl);
+    await vi.waitFor(() => {
+      expect(store.getState().flow).toMatchObject({ kind: "oauth", notices: [openUrl] });
+    });
+    release();
+  });
+
+  it("keeps the store active while any owner still holds a retain", async () => {
+    const stream = loginStream();
+    const { client } = fakeClient(stream);
+    const store = createProviderAuthStore(client);
+    const releaseFirst = store.retain();
+    const releaseSecond = store.retain();
+
+    store.beginOauth("anthropic");
+    stream.push(prompt);
+    await vi.waitFor(() => {
+      expect(store.getState().flow).toMatchObject({ kind: "oauth", prompt });
+    });
+
+    releaseFirst();
+    expect(store.getState().flow).toMatchObject({ kind: "oauth", prompt });
+    expect(stream.wasReturned()).toBe(false);
+
+    releaseSecond();
+    expect(store.getState()).toEqual(INITIAL_PROVIDER_AUTH_STATE);
+    await vi.waitFor(() => {
+      expect(stream.wasReturned()).toBe(true);
+    });
+  });
+
+  it("cancel ends the login stream and dismisses the flow", async () => {
+    const stream = loginStream();
+    const { client } = fakeClient(stream);
+    const store = createProviderAuthStore(client);
+
+    store.beginOauth("anthropic");
+    stream.push(prompt);
+    await vi.waitFor(() => {
+      expect(store.getState().flow).toMatchObject({ kind: "oauth", prompt });
+    });
+
+    store.cancel();
+    expect(store.getState().flow).toBeNull();
+    await vi.waitFor(() => {
+      expect(stream.wasReturned()).toBe(true);
+    });
   });
 });

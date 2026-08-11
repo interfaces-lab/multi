@@ -1,6 +1,6 @@
 import type { DesktopUpdateState } from "@honk/shared/desktop-api";
 import { Button, Icon, IconButton, Picker, Switch, Text, Tooltip } from "@honk/ui";
-import { IconClipboard, IconFolder1, IconFolderOpen } from "@honk/ui/icons";
+import { IconClipboard, IconComputerUse, IconFolder1, IconFolderOpen } from "@honk/ui/icons";
 import { colorVars, controlVars, radiusVars, spaceVars } from "@honk/ui/tokens.stylex";
 import * as stylex from "@stylexjs/stylex";
 import * as React from "react";
@@ -11,15 +11,15 @@ import {
   useAppSettings,
 } from "./app-settings-store";
 import { deleteCustomAlertSound, playAlertSound, saveCustomAlertSound } from "./completion-sound";
-import {
-  DEFAULT_ALERT_SOUND,
-  isAlertSoundSelection,
-  type AlertSoundName,
-} from "./alert-sound-model";
+import { DEFAULT_ALERT_SOUND, type AlertSoundName } from "./alert-sound-model";
 import { useHonkDesktopSettings } from "./desktop-extensions/runtime";
-import { canShowItemInFolder, pickFolder, showItemInFolder } from "./desktop-bridge";
+import {
+  canShowItemInFolder,
+  pickFolder,
+  readDesktopRemoteAccessAvailability,
+  showItemInFolder,
+} from "./desktop-bridge";
 import { errorMessage } from "./error-message";
-import { actions as modeActions, DEFAULT_MODE, MODES, modeById, useDefaultMode } from "./modes";
 import {
   buildNotificationSettingsSupportText,
   requestBrowserNotificationPermission,
@@ -35,19 +35,23 @@ import { DesktopSettingsToggleRow } from "./settings-desktop-toggle";
 import { actions as toastActions } from "./toast-store";
 import { updatePillActions, useUpdatePill } from "./update-pill";
 
+const DeferredConnectPhoneDialog = React.lazy(() =>
+  import("./connect-phone").then((module) => ({ default: module.ConnectPhoneDialog })),
+);
+
 const UPDATE_DATE_TIME_FORMATTER = new Intl.DateTimeFormat(undefined, {
   dateStyle: "medium",
   timeStyle: "short",
 });
 
-const ALERT_SOUND_OPTIONS = [
-  { value: "ready", label: "Ready", description: "Focused tone with a soft bloom." },
-  { value: "chime", label: "Chime", description: "Soft two-note bell." },
-] as const satisfies readonly {
+const ALERT_SOUND_OPTIONS: readonly {
   value: AlertSoundName;
   label: string;
   description: string;
-}[];
+}[] = [
+  { value: "ready", label: "Ready", description: "Focused tone with a soft bloom." },
+  { value: "chime", label: "Chime", description: "Soft two-note bell." },
+];
 
 const styles = stylex.create({
   hiddenFileInput: {
@@ -117,18 +121,56 @@ const styles = stylex.create({
   },
 });
 
+function ConnectPhoneSettingsRow(props: {
+  readonly availability: "ready" | "restart-required";
+}): React.ReactElement {
+  const [open, setOpen] = React.useState(false);
+  const ready = props.availability === "ready";
+  return (
+    <>
+      <SettingsRow
+        title="Connect phone"
+        description={
+          ready
+            ? "Reach this computer securely from Honk mobile through Tailscale."
+            : "Restart Honk to load phone pairing, then scan the code with Honk mobile."
+        }
+        control={
+          ready ? (
+            <Button
+              size="sm"
+              iconStart={<Icon icon={IconComputerUse} size="sm" />}
+              onClick={() => setOpen(true)}
+            >
+              Show code…
+            </Button>
+          ) : (
+            <Text size="sm" tone="warn">
+              Restart required
+            </Text>
+          )
+        }
+      />
+      {ready && open ? (
+        <React.Suspense fallback={null}>
+          <DeferredConnectPhoneDialog open onClose={() => setOpen(false)} />
+        </React.Suspense>
+      ) : null}
+    </>
+  );
+}
+
 export function SettingsGeneral(): React.ReactElement {
   const appSettings = useAppSettings();
   const alertSoundInputRef = React.useRef<HTMLInputElement>(null);
-  const defaultMode = useDefaultMode();
   const directory = appSettings.defaultProjectDirectory;
   const desktopSettings = useHonkDesktopSettings().filter(
     (setting) => setting.section === "general",
   );
-  const canChooseDirectory =
-    typeof window !== "undefined" && window.desktopBridge?.pickFolder !== undefined;
-  const canCopyDirectory =
-    directory !== null && typeof navigator !== "undefined" && navigator.clipboard !== undefined;
+  const canChooseDirectory = globalThis.window?.desktopBridge?.pickFolder !== undefined;
+  const clipboard = globalThis.navigator?.clipboard;
+  const remoteAccess = readDesktopRemoteAccessAvailability();
+  const canCopyDirectory = directory !== null && clipboard !== undefined;
   const canRevealDirectory = directory !== null && canShowItemInFolder();
 
   const choose = (): void => {
@@ -138,8 +180,8 @@ export function SettingsGeneral(): React.ReactElement {
   };
 
   const copy = (): void => {
-    if (directory === null) return;
-    void navigator.clipboard.writeText(directory).then(
+    if (directory === null || clipboard === undefined) return;
+    void clipboard.writeText(directory).then(
       () => {
         toastActions.add({ type: "success", title: "Copied project folder" });
       },
@@ -219,42 +261,6 @@ export function SettingsGeneral(): React.ReactElement {
       <SettingsSection>
         <SettingsRows>
           <UpdateSettingsRow />
-          <SettingsRow
-            title="Default mode"
-            description="Choose how new threads start. You can change modes while you work."
-            resetAction={
-              defaultMode === DEFAULT_MODE ? null : (
-                <SettingResetButton
-                  label="default mode"
-                  onClick={() => {
-                    modeActions.resetDefaultMode();
-                  }}
-                />
-              )
-            }
-            control={
-              <Picker.Root
-                value={defaultMode}
-                onValueChange={(value) => {
-                  modeActions.setDefaultMode(value);
-                }}
-              >
-                <Picker.Trigger size="sm" accessibilityLabel="Default mode">
-                  {modeById(defaultMode).label}
-                </Picker.Trigger>
-                <Picker.Popup label="Default mode" width="wide" layer="dialog" align="end">
-                  {MODES.map((option) => (
-                    <Picker.Option
-                      key={option.id}
-                      value={option.id}
-                      label={option.label}
-                      description={option.description}
-                    />
-                  ))}
-                </Picker.Popup>
-              </Picker.Root>
-            }
-          />
           <SettingsRow
             title="Default environment"
             description="Choose whether new threads start in the project or an isolated worktree."
@@ -336,7 +342,7 @@ export function SettingsGeneral(): React.ReactElement {
             <div {...stylex.props(styles.locationPath)}>
               {directory === null ? (
                 <Text size="xs" tone="muted">
-                  Uses each server’s default folder
+                  Choose a folder when you start a chat
                 </Text>
               ) : (
                 <Text as="div" size="xs" family="mono" truncate>
@@ -431,8 +437,12 @@ export function SettingsGeneral(): React.ReactElement {
                 <Picker.Root
                   value={appSettings.alertSoundSelection}
                   onValueChange={(value) => {
-                    if (!isAlertSoundSelection(value)) return;
-                    appSettingsActions.setAlertSoundSelection(value);
+                    switch (value) {
+                      case "ready":
+                      case "chime":
+                      case "custom":
+                        appSettingsActions.setAlertSoundSelection(value);
+                    }
                   }}
                 >
                   <Picker.Trigger size="sm" accessibilityLabel="Alert sound">
@@ -514,6 +524,14 @@ export function SettingsGeneral(): React.ReactElement {
         </SettingsRows>
       </SettingsSection>
 
+      {remoteAccess.status === "web" ? null : (
+        <SettingsSection title="Remote access">
+          <SettingsRows>
+            <ConnectPhoneSettingsRow availability={remoteAccess.status} />
+          </SettingsRows>
+        </SettingsSection>
+      )}
+
       <SettingsSection title="Interaction">
         <SettingsRows>
           <SettingsRow
@@ -589,8 +607,7 @@ function NotificationPermissionRow(): React.ReactElement {
   const isGranted = permission === "granted";
   const canRequest = permission === "default";
   const isDesktopShell =
-    typeof document !== "undefined" &&
-    document.documentElement.getAttribute("data-shell-platform") === "electron";
+    globalThis.document?.documentElement.getAttribute("data-shell-platform") === "electron";
 
   return (
     <SettingsRow
@@ -647,7 +664,7 @@ function updateDescription(state: DesktopUpdateState): string {
     case "available":
       return `Update ${formatVersion(state.availableVersion ?? state.currentVersion)} is available.`;
     case "downloading":
-      return typeof state.downloadPercent === "number"
+      return state.downloadPercent !== null
         ? `Downloading update… ${Math.floor(state.downloadPercent)}%`
         : "Downloading update…";
     case "downloaded":
@@ -664,6 +681,8 @@ function formatVersion(version: string): string {
 }
 
 function formatCheckedAt(value: string | null): string | null {
-  if (value === null || Number.isNaN(Date.parse(value))) return null;
-  return UPDATE_DATE_TIME_FORMATTER.format(new Date(value));
+  if (value === null) return null;
+  const date = new Date(value);
+  if (date.toJSON() === null) return null;
+  return UPDATE_DATE_TIME_FORMATTER.format(date);
 }

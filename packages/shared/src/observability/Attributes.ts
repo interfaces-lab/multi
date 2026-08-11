@@ -1,13 +1,9 @@
-import { Cause, Exit, Predicate } from "effect";
+import { Cause, Exit } from "effect";
 
 export type MetricAttributeValue = string;
 export type MetricAttributes = Readonly<Record<string, MetricAttributeValue>>;
 export type TraceAttributes = Readonly<Record<string, unknown>>;
 export type ObservabilityOutcome = "success" | "failure" | "interrupt";
-
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return Predicate.isObject(value);
-}
 
 function markSeen(value: object, seen: WeakSet<object>): boolean {
   if (seen.has(value)) {
@@ -63,19 +59,9 @@ function normalizeJsonValue(value: unknown, seen: WeakSet<object> = new WeakSet(
     }
     return Array.from(value.values(), (entry) => normalizeJsonValue(entry, seen));
   }
-  if (!isPlainObject(value)) {
-    if (
-      typeof value === "string" ||
-      typeof value === "number" ||
-      typeof value === "boolean" ||
-      typeof value === "bigint" ||
-      value === null ||
-      value === undefined
-    ) {
-      return String(value);
-    }
-    return JSON.stringify(value);
-  }
+  if (value instanceof Function)
+    return value.name === "" ? "[Function]" : `[Function ${value.name}]`;
+  if (!(value instanceof Object)) return "[Symbol]";
   if (markSeen(value, seen)) {
     return "[Circular]";
   }

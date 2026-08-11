@@ -10,9 +10,8 @@ import {
   zVars,
 } from "@honk/ui/tokens.stylex";
 import * as React from "react";
-import { useSyncExternalStore } from "react";
+import { useRouterState } from "@tanstack/react-router";
 
-import { getSnapshot as getTabSnapshot, subscribe as subscribeTabs } from "./tab-store";
 import {
   actions as toastActions,
   shouldRenderToast,
@@ -68,18 +67,15 @@ const styles = stylex.create({
   },
 });
 
-function getActiveTabKey(): string {
-  return getTabSnapshot().activeKey;
-}
-
-function useActiveTabKey(): string {
-  return useSyncExternalStore(subscribeTabs, getActiveTabKey, getActiveTabKey);
-}
-
 function ToastViewportHost(): React.ReactElement | null {
   const { toasts } = useToasts();
-  const activeKey = useActiveTabKey();
-  const visible = toasts.filter((toast) => shouldRenderToast(toast, activeKey));
+  const activeSessionId = useRouterState({
+    select: (state) =>
+      state.location.pathname.startsWith("/chat/")
+        ? state.location.pathname.slice("/chat/".length)
+        : null,
+  });
+  const visible = toasts.filter((toast) => shouldRenderToast(toast, activeSessionId));
 
   if (visible.length === 0) return null;
   return (

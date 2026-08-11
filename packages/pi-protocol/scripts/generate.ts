@@ -1,14 +1,14 @@
 #!/usr/bin/env node
 
-// Vendors Pi's remote-session protocol schemas verbatim.
+// Fetches Pi's remote-session protocol schemas from a pinned upstream ref.
 //
 // Pi does not publish @earendil-works/pi-protocol to npm yet, so this script
 // follows the t3code pattern for the codex app-server: pin an upstream ref,
-// fetch the schema source at that exact commit, and commit it unchanged.
-// Byte-identical vendoring means zero translation drift; the schemas stay
-// Pi-owned. Bumping the pin means editing UPSTREAM_REF and rerunning
-// `pnpm generate`; upstream drift then shows up as a reviewable diff. When Pi
-// publishes the package, this whole package dissolves into a dependency swap.
+// fetch the schema source at that exact commit, and format it with Honk's
+// checked-in formatter through the package's `generate` script. The formatting
+// is the only transformation: the schemas stay Pi-owned and upstream drift
+// remains a reviewable diff. When Pi publishes the package, this whole package
+// dissolves into a dependency swap.
 
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -33,7 +33,8 @@ const source = await fetchText(`${RAW_BASE}/packages/protocol/src/schemas.ts`);
 
 const generatedDir = path.join(import.meta.dirname, "..", "src", "_generated");
 await mkdir(generatedDir, { recursive: true });
-// schemas.ts stays byte-identical to upstream; provenance lives in meta.gen.ts.
+// The package script formats this fetched source after the write. Provenance
+// lives beside it in meta.gen.ts rather than modifying Pi's schema module.
 await writeFile(path.join(generatedDir, "schemas.ts"), source);
 await writeFile(
   path.join(generatedDir, "meta.gen.ts"),
@@ -45,4 +46,4 @@ await writeFile(
   ].join("\n"),
 );
 
-console.log(`Vendored pi-protocol ${packageJson.version} schemas at ${UPSTREAM_REF}`);
+console.log(`Fetched pi-protocol ${packageJson.version} schemas at ${UPSTREAM_REF}`);

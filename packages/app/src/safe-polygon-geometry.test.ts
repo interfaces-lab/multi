@@ -1,10 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import {
-  computeSafeZone,
-  isPointInPolygon,
-  isPointInSafeZone,
-} from "./safe-polygon-geometry";
+import { computeSafeZone, isPointInPolygon, isPointInSafeZone } from "./safe-polygon-geometry";
 
 // A trigger row on the left, a taller submenu opening to its right — the demo's layout
 // and the shape the screenshots show.

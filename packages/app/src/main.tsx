@@ -12,20 +12,24 @@ if (rootEl === null) {
 }
 
 const root = createRoot(rootEl);
+const pathname = window.location.pathname;
 const isDesktopWorkspace =
-  document.documentElement.getAttribute("data-shell-platform") === "electron" &&
-  window.location.pathname !== "/setup" &&
-  // The core chat surface renders bare, without the opencode startup shell.
-  window.location.pathname !== "/v2" &&
-  !window.location.pathname.startsWith("/v2/");
+  document.documentElement.getAttribute("data-shell-platform") === "electron";
 
 const loadApplication = (): void => {
   void import("./start-app").then(({ startApp }) => {
-    startApp(root);
+    void startApp(root);
   });
 };
 
-if (isDesktopWorkspace) {
+if (pathname === "/setup") {
+  // First run paints onboarding from its own small chunk: no router, no
+  // backend, no application graph. The full app loads on the next launch,
+  // once setup marks itself complete and the window reopens on "/".
+  void import("./onboarding-canvas").then(({ OnboardingCanvas }) => {
+    root.render(<OnboardingCanvas />);
+  });
+} else if (isDesktopWorkspace) {
   root.render(<StartupShell />);
   // Leave one compositor opportunity between the permanent shell and the
   // authenticated application graph. This affects cold interactivity by at

@@ -9,7 +9,7 @@
  */
 export default {
   extends: ["stylelint-config-standard"],
-  ignoreFiles: ["**/node_modules/**", "**/dist/**", "**/out/**"],
+  ignoreFiles: ["**/node_modules/**", "**/dist/**", "**/out/**", "packages/cli/web/**"],
   overrides: [
     {
       files: ["packages/app/src/**/*.css", "packages/ui/src/**/*.css"],

@@ -1,7 +1,6 @@
 #!/usr/bin/env node
 
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
-import { randomBytes } from "node:crypto";
 import { mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { homedir } from "node:os";
@@ -10,7 +9,6 @@ import { join, resolve } from "node:path";
 import { desktopDir, resolveElectronPath } from "./electron-launcher.mjs";
 
 const devScriptStartedAt = Date.now();
-const baseSidecarPort = 13973;
 const baseRendererPort = 5733;
 const maxHashOffset = 3_000;
 const maxPort = 65_535;
@@ -154,55 +152,20 @@ async function portConflict(label: string, port: number): Promise<PortConflict |
   return { label, port, owners: listPortOwners(port) };
 }
 
-function printPortConflictAndExit(input: {
-  readonly title: string;
-  readonly conflicts: readonly PortConflict[];
-  readonly retryCommand?: string;
-}): never {
-  const lines = ["", input.title, ""];
-  for (const [index, conflict] of input.conflicts.entries()) {
-    if (index > 0) {
-      lines.push("");
-    }
-    lines.push(...formatPortConflict(conflict));
-  }
-  if (input.retryCommand !== undefined) {
-    lines.push("", "Then rerun:", `  ${input.retryCommand}`);
-  }
-  console.error(lines.join("\n"));
-  process.exit(1);
-}
-
 function printDevPlan(input: {
   readonly source: string;
-  readonly sidecarPort: number;
   readonly rendererUrl: string;
   readonly honkHome: string;
-  readonly bootstrapUrl: string;
 }): void {
   const lines = [
     "",
     "Honk dev",
-    `  Ports:    Sidecar ${String(input.sidecarPort)} · Desktop ${input.rendererUrl}`,
-    `  Home:     ${input.rendererUrl} → opencode sidecar`,
+    `  Desktop:  ${input.rendererUrl}`,
     `  Data:     ${input.honkHome}`,
     `  Source:   ${input.source}`,
     "",
-    "Browser attach (token = opencode sidecar password):",
-    `  ${input.bootstrapUrl}`,
-    "",
   ];
   console.log(lines.join("\n"));
-}
-
-function buildBrowserBootstrapUrl(input: {
-  readonly baseUrl: string;
-  readonly token: string;
-}): string {
-  const url = new URL("/", input.baseUrl);
-  url.searchParams.delete("token");
-  url.hash = new URLSearchParams([["token", input.token]]).toString();
-  return url.toString();
 }
 
 function resolveOffset(env: NodeJS.ProcessEnv): {
@@ -256,24 +219,20 @@ async function canListenOnPort(port: number): Promise<boolean> {
 async function findFirstAvailableOffset(input: {
   readonly startOffset: number;
   readonly hasExplicitRendererUrl: boolean;
-  readonly hasExplicitSidecarPort: boolean;
 }): Promise<number> {
   for (let offset = input.startOffset; ; offset += 1) {
     const rendererPort = baseRendererPort + offset;
-    const sidecarPort = baseSidecarPort + offset;
-    if (rendererPort > maxPort || sidecarPort > maxPort) {
+    if (rendererPort > maxPort) {
       break;
     }
 
-    const rendererAvailable = input.hasExplicitRendererUrl || (await canListenOnPort(rendererPort));
-    const sidecarAvailable = input.hasExplicitSidecarPort || (await canListenOnPort(sidecarPort));
-    if (rendererAvailable && sidecarAvailable) {
+    if (input.hasExplicitRendererUrl || (await canListenOnPort(rendererPort))) {
       return offset;
     }
   }
 
   throw new Error(
-    `No available desktop dev ports found from offset ${input.startOffset}. Tried renderer=${baseRendererPort}+n and sidecar=${baseSidecarPort}+n up to port ${maxPort}.`,
+    `No available desktop dev ports found from offset ${input.startOffset}. Tried renderer=${baseRendererPort}+n up to port ${maxPort}.`,
   );
 }
 
@@ -291,17 +250,12 @@ function resolveDevUserDataDir() {
 
 async function createDesktopDevEnv(baseEnv: NodeJS.ProcessEnv): Promise<NodeJS.ProcessEnv> {
   const explicitRendererUrl = baseEnv.VITE_DEV_SERVER_URL?.trim() || undefined;
-  const explicitSidecarPort = parseOptionalPort(baseEnv.HONK_OPENCODE_PORT);
   const { offset, source } = resolveOffset(baseEnv);
   const selectedOffset = await findFirstAvailableOffset({
     startOffset: offset,
     hasExplicitRendererUrl: explicitRendererUrl !== undefined,
-    hasExplicitSidecarPort: explicitSidecarPort !== undefined,
   });
   const rendererPort = parseOptionalPort(baseEnv.PORT) ?? baseRendererPort + selectedOffset;
-  const sidecarPort = explicitSidecarPort ?? baseSidecarPort + selectedOffset;
-  const sidecarOrigin = `http://${desktopDevLoopbackHost}:${sidecarPort}`;
-  const sidecarPassword = baseEnv.HONK_OPENCODE_PASSWORD?.trim() || randomBytes(24).toString("hex");
   const honkHome = resolve(baseEnv.HONK_HOME?.trim() || join(homedir(), ".honk"));
   const rendererUrl = explicitRendererUrl ?? `http://${desktopDevLoopbackHost}:${rendererPort}`;
 
@@ -311,10 +265,7 @@ async function createDesktopDevEnv(baseEnv: NodeJS.ProcessEnv): Promise<NodeJS.P
     HOST: desktopDevLoopbackHost,
     PORT: String(rendererPort),
     VITE_DEV_SERVER_URL: rendererUrl,
-    VITE_HTTP_URL: sidecarOrigin,
     HONK_HOME: honkHome,
-    HONK_OPENCODE_PORT: String(sidecarPort),
-    HONK_OPENCODE_PASSWORD: sidecarPassword,
   };
 
   if (baseEnv.HONK_DEV_STARTUP_PROBE === "1") {
@@ -333,9 +284,6 @@ async function createDesktopDevEnv(baseEnv: NodeJS.ProcessEnv): Promise<NodeJS.P
       await Promise.all([
         explicitRendererUrl === undefined
           ? portConflict("Desktop renderer", baseRendererPort + offset)
-          : Promise.resolve(null),
-        explicitSidecarPort === undefined
-          ? portConflict("opencode sidecar", baseSidecarPort + offset)
           : Promise.resolve(null),
       ])
     ).filter((conflict): conflict is PortConflict => conflict !== null);
@@ -359,10 +307,8 @@ async function createDesktopDevEnv(baseEnv: NodeJS.ProcessEnv): Promise<NodeJS.P
   printDevPlan({
     source:
       selectedOffset === offset ? source : `${source}; selected offset ${String(selectedOffset)}`,
-    sidecarPort,
     rendererUrl,
     honkHome,
-    bootstrapUrl: buildBrowserBootstrapUrl({ baseUrl: rendererUrl, token: sidecarPassword }),
   });
 
   return env;

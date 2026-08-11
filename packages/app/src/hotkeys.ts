@@ -1,21 +1,24 @@
-// Shell hotkey registry (ADR 0025). Shell mounts it once. Chord defaults live in
-// SHELL_KEYBINDING_DEFAULTS. User overrides merge a Partial map over that table.
+// Shell hotkey registry. Shell mounts it once; leaf routes do not bind shell
+// chords. Tab chords go through the tab store, so the strip, the keyboard,
+// and the context menu change one selection.
 
 import { useHotkeys } from "@tanstack/react-hotkeys";
 import type { RegisterableHotkey, UseHotkeyDefinition } from "@tanstack/react-hotkeys";
+import { useNavigate, type UseNavigateResult } from "@tanstack/react-router";
 
 import {
   actions as commandMenuActions,
   getSnapshot as getCommandMenuSnapshot,
 } from "./command-menu-store";
 import { actions as settingsActions, getSnapshot as getSettingsSnapshot } from "./settings-store";
+import { HOME_TAB_KEY } from "./tab-presentation";
 import { actions as tabActions, getSnapshot as getTabsSnapshot } from "./tab-store";
 import { workbenchActions } from "./workbench-controller";
 
 export type ShellKeybindingCommand =
-  | "tab.closeActive"
+  | "navigation.close"
+  | "navigation.newChat"
   | "tab.reopen"
-  | "tab.openNew"
   | "tab.jump.1"
   | "tab.jump.2"
   | "tab.jump.3"
@@ -32,10 +35,10 @@ export type ShellKeybindingCommand =
 
 export type ShellKeybindingDefaults = Readonly<Record<ShellKeybindingCommand, RegisterableHotkey>>;
 
-export const SHELL_KEYBINDING_DEFAULTS = {
-  "tab.closeActive": "Mod+W",
+export const SHELL_KEYBINDING_DEFAULTS: ShellKeybindingDefaults = {
+  "navigation.close": "Mod+W",
+  "navigation.newChat": "Mod+N",
   "tab.reopen": "Mod+Shift+T",
-  "tab.openNew": "Mod+N",
   "tab.jump.1": "Mod+1",
   "tab.jump.2": "Mod+2",
   "tab.jump.3": "Mod+3",
@@ -49,12 +52,12 @@ export const SHELL_KEYBINDING_DEFAULTS = {
   "commandMenu.openThreads": "Mod+O",
   "settings.toggle": "Mod+,",
   "workbench.toggleMaximized": "Mod+Shift+M",
-} as const satisfies ShellKeybindingDefaults;
+};
 
-const SHELL_COMMANDS = [
-  "tab.closeActive",
+const SHELL_COMMANDS: readonly ShellKeybindingCommand[] = [
+  "navigation.close",
+  "navigation.newChat",
   "tab.reopen",
-  "tab.openNew",
   "tab.jump.1",
   "tab.jump.2",
   "tab.jump.3",
@@ -68,7 +71,7 @@ const SHELL_COMMANDS = [
   "commandMenu.openThreads",
   "settings.toggle",
   "workbench.toggleMaximized",
-] as const satisfies readonly ShellKeybindingCommand[];
+];
 
 const JUMP_COMMANDS = [
   "tab.jump.1",
@@ -80,42 +83,42 @@ const JUMP_COMMANDS = [
   "tab.jump.7",
   "tab.jump.8",
   "tab.jump.9",
-] as const satisfies readonly ShellKeybindingCommand[];
+] satisfies readonly ShellKeybindingCommand[];
 
 type HotkeyBinding = UseHotkeyDefinition;
+type Navigate = UseNavigateResult<string>;
 
 function bind(hotkey: RegisterableHotkey, callback: () => void): HotkeyBinding {
-  // Fire even when focus is in an input. Pin ignoreInputs so chord overrides stay consistent.
   return { hotkey, callback, options: { preventDefault: true, ignoreInputs: false } };
 }
 
+/** ⌘1 is Home; ⌘2–9 jump across the projected tab order after it. */
 function activateIndex(index: number): void {
-  const tab = getTabsSnapshot().tabs[index];
-  if (tab !== undefined) {
-    tabActions.activate(tab.key);
+  if (index === 0) {
+    tabActions.activate(HOME_TAB_KEY);
+    return;
   }
+  const id = getTabsSnapshot().tabs[index - 1];
+  if (id !== undefined) tabActions.activate(id);
 }
 
-function dispatch(command: ShellKeybindingCommand): void {
+function dispatch(command: ShellKeybindingCommand, navigate: Navigate): void {
   switch (command) {
-    case "tab.closeActive":
+    case "navigation.close":
       // Close the topmost overlay first. A modal sits over the task, not instead of it.
       if (getCommandMenuSnapshot().open) {
         commandMenuActions.close();
-        return;
-      }
-      if (getSettingsSnapshot().open) {
+      } else if (getSettingsSnapshot().open) {
         settingsActions.close();
-        return;
+      } else {
+        tabActions.closeActive();
       }
-      // closeActive skips Home (slot 0).
-      tabActions.closeActive();
+      return;
+    case "navigation.newChat":
+      void navigate({ to: "/chat" });
       return;
     case "tab.reopen":
       tabActions.reopen();
-      return;
-    case "tab.openNew":
-      tabActions.openNew();
       return;
     case "tab.jump.1":
     case "tab.jump.2":
@@ -127,9 +130,7 @@ function dispatch(command: ShellKeybindingCommand): void {
     case "tab.jump.8":
     case "tab.jump.9": {
       const index = JUMP_COMMANDS.indexOf(command);
-      if (index >= 0) {
-        activateIndex(index);
-      }
+      if (index >= 0) activateIndex(index);
       return;
     }
     case "commandMenu.toggle":
@@ -154,23 +155,25 @@ function dispatch(command: ShellKeybindingCommand): void {
   }
 }
 
-export function resolveShellHotkeys(overrides?: Partial<ShellKeybindingDefaults>): HotkeyBinding[] {
+export function resolveShellHotkeys(
+  navigate: Navigate,
+  overrides?: Partial<ShellKeybindingDefaults>,
+): HotkeyBinding[] {
   const resolved: ShellKeybindingDefaults = {
     ...SHELL_KEYBINDING_DEFAULTS,
     ...overrides,
   };
-
   return SHELL_COMMANDS.map((command) =>
     bind(resolved[command], () => {
-      dispatch(command);
+      dispatch(command, navigate);
     }),
   );
 }
 
-// Mount once on the shell route. Unbinds on unmount.
 export function useShellHotkeys(
   overrides?: Partial<ShellKeybindingDefaults>,
   enabled = true,
 ): void {
-  useHotkeys(resolveShellHotkeys(overrides), { enabled });
+  const navigate = useNavigate();
+  useHotkeys(resolveShellHotkeys(navigate, overrides), { enabled });
 }

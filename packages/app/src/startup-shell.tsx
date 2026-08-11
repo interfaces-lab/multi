@@ -1,26 +1,15 @@
 import { Shell } from "@honk/ui/shell";
 import * as React from "react";
 
-type StartupTheme = "system" | "light" | "dark";
+import { readAppearanceBlob, type ThemePreference } from "./appearance-blob";
 
-const schemeStyles: Record<StartupTheme, React.CSSProperties> = {
+const schemeStyles: Record<ThemePreference, React.CSSProperties> = {
   system: { colorScheme: "light dark" },
   light: { colorScheme: "light" },
   dark: { colorScheme: "dark" },
 };
 
-function readStartupTheme(): StartupTheme {
-  try {
-    const stored: unknown = JSON.parse(localStorage.getItem("honk:app:appearance") || "null");
-    if (typeof stored !== "object" || stored === null) {
-      return "system";
-    }
-    const theme = Reflect.get(stored, "theme");
-    return theme === "light" || theme === "dark" ? theme : "system";
-  } catch {
-    return "system";
-  }
-}
+const readStartupTheme = (): ThemePreference => readAppearanceBlob()?.theme ?? "system";
 
 function StartupShell(): React.ReactElement {
   return (

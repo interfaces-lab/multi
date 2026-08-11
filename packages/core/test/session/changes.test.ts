@@ -5,7 +5,7 @@
 // disk — including through bash, which no argument-reading fold could see.
 
 import { execFileSync } from "node:child_process";
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -17,9 +17,9 @@ import {
 } from "@earendil-works/pi-ai/providers/faux";
 import { describe, expect, it } from "vitest";
 
-import type { HonkClient } from "../../src/honk-core";
+import type { HonkClient } from "../../src/client";
 import { createHonkCore } from "../../src/honk-core";
-import { createExecutionEnv } from "../../src/testing";
+import { createExecutionEnv, generatePromptSessionTitle } from "../../src/testing";
 import { Tools } from "../../src/tools";
 
 const startCore = async () => {
@@ -29,6 +29,7 @@ const startCore = async () => {
   const core = await createHonkCore({
     dataDirectory: await mkdtemp(join(tmpdir(), "honk-core-data-")),
     createModels: () => collection,
+    generateSessionTitle: generatePromptSessionTitle,
     createExecutionEnv,
   });
   return { core, faux };
@@ -110,6 +111,43 @@ describe("session.changes", () => {
     await core.close();
   });
 
+  it("reports only checkpoints on the active sibling branch", async () => {
+    const directory = await gitWorkspace();
+    await writeFile(join(directory, "branch.txt"), "one\n");
+
+    const { core, faux } = await startCore();
+    const sdk = core.client();
+    const workspace = await openTrusted(sdk, directory);
+    const session = await sdk.session.create({ workspaceId: workspace.id });
+
+    faux.setResponses([
+      fauxAssistantMessage([editCall("branch.txt", "one", "two")]),
+      fauxAssistantMessage("Original branch done."),
+    ]);
+    await sdk.session.prompt({ sessionId: session.id, text: "one to two" });
+    const original = (await sdk.session.reload({ sessionId: session.id })).entries.find(
+      (entry) => entry.type === "message" && entry.message.role === "user",
+    );
+    if (original === undefined) throw new Error("missing original user message");
+
+    faux.setResponses([
+      fauxAssistantMessage([editCall("branch.txt", "two", "three")]),
+      fauxAssistantMessage("Revised branch done."),
+    ]);
+    await sdk.session.editMessage({
+      sessionId: session.id,
+      entryId: original.id,
+      text: "one to three instead",
+    });
+
+    expect(await readFile(join(directory, "branch.txt"), "utf8")).toBe("three\n");
+    const { turns } = await sdk.session.changes({ sessionId: session.id });
+    expect(turns).toHaveLength(1);
+    expect(turns[0]?.files.map((file) => file.file)).toEqual(["branch.txt"]);
+
+    await core.close();
+  });
+
   it("keeps turns separate: two passes over one file are two receipts", async () => {
     const directory = await gitWorkspace();
     await writeFile(join(directory, "a.txt"), "1\n");
@@ -174,6 +212,73 @@ describe("session.changes", () => {
     );
     expect(mineFiles).toEqual(["mine.txt"]);
     expect(theirsFiles).toEqual(["theirs.txt"]);
+
+    await core.close();
+  });
+
+  it("relativizes an absolute declared path and keeps the gate scoped", async () => {
+    const directory = await gitWorkspace();
+    await writeFile(join(directory, "mine.txt"), "m\n");
+    await writeFile(join(directory, "theirs.txt"), "t\n");
+
+    const { core, faux } = await startCore();
+    const sdk = core.client();
+    const workspace = await openTrusted(sdk, directory);
+    const mine = await sdk.session.create({ workspaceId: workspace.id });
+    const theirs = await sdk.session.create({ workspaceId: workspace.id });
+
+    // A sibling edit lands between mine's checkpoints, so mine's snapshot
+    // diff contains it — only the gate keeps it out of the receipt.
+    faux.setResponses([
+      fauxAssistantMessage([editCall("theirs.txt", "t", "T")]),
+      fauxAssistantMessage("done"),
+    ]);
+    await sdk.session.prompt({ sessionId: theirs.id, text: "edit theirs" });
+
+    // The model names its file absolutely, as Pi's writing tools allow. The
+    // workspace's own directory is the canonical form — trust resolved it
+    // through the real filesystem, exactly as the model sees it in its cwd.
+    faux.setResponses([
+      fauxAssistantMessage([editCall(join(workspace.directory, "mine.txt"), "m", "M")]),
+      fauxAssistantMessage("done"),
+    ]);
+    await sdk.session.prompt({ sessionId: mine.id, text: "edit mine" });
+
+    // The absolute path aligns with git's workspace-relative form: the write
+    // appears, the sibling's does not — the turn stayed declared, not opaque.
+    const { turns } = await sdk.session.changes({ sessionId: mine.id });
+    expect(turns.flatMap((turn) => turn.files.map((file) => file.file))).toEqual(["mine.txt"]);
+
+    await core.close();
+  });
+
+  it("errs open when a declared path cannot be placed in the workspace", async () => {
+    const parent = await mkdtemp(join(tmpdir(), "honk-alias-"));
+    const directory = join(parent, "workspace");
+    await mkdir(directory);
+    execFileSync("git", ["init", "."], { cwd: directory });
+    await writeFile(join(directory, "hello.txt"), "one\n");
+    await symlink(directory, join(parent, "alias"));
+
+    const { core, faux } = await startCore();
+    const sdk = core.client();
+    const workspace = await openTrusted(sdk, directory);
+    const session = await sdk.session.create({ workspaceId: workspace.id });
+
+    // The write reaches the file through a symlink outside the workspace, so
+    // no lexical resolution can place it inside. The gate must err open —
+    // the turn goes opaque and claims the whole diff — because filtering on
+    // the unplaceable path would silently drop a real write.
+    faux.setResponses([
+      fauxAssistantMessage([editCall(join(parent, "alias", "hello.txt"), "one", "two")]),
+      fauxAssistantMessage("done"),
+    ]);
+    await sdk.session.prompt({ sessionId: session.id, text: "edit through the alias" });
+    expect(await readFile(join(directory, "hello.txt"), "utf8")).toBe("two\n");
+
+    const { turns } = await sdk.session.changes({ sessionId: session.id });
+    expect(turns).toHaveLength(1);
+    expect(turns[0]?.files.map((file) => file.file)).toEqual(["hello.txt"]);
 
     await core.close();
   });

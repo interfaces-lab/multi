@@ -1,6 +1,6 @@
 import * as stylex from "@stylexjs/stylex";
 import { Icon, IconButton, Tooltip, WorkbenchRailRow, type Glyph } from "@honk/ui";
-import { IconChevronDoubleLeft, IconChevronDoubleRight, IconPlusSmall } from "@honk/ui/icons";
+import { IconChevronDoubleLeft, IconChevronDoubleRight } from "@honk/ui/icons";
 import {
   colorVars,
   controlVars,
@@ -107,14 +107,6 @@ const styles = stylex.create({
     fontWeight: fontVars["--honk-font-weight-regular"],
     fontVariantNumeric: "tabular-nums",
   },
-  railSectionHeading: { display: "flex", alignItems: "flex-start", minWidth: 0 },
-  railSectionAction: {
-    flexShrink: 0,
-    // oxlint-disable-next-line honk/design-no-raw-values -- -4px rail inset offset is fixed geometry, no spacing token owns 4px
-    marginBlockStart: `calc(${RAIL_INSET_SMALL} * -1)`,
-    // oxlint-disable-next-line honk/design-no-raw-values -- 4px rail inset is fixed geometry, no spacing token owns 4px
-    marginInlineEnd: RAIL_INSET_SMALL,
-  },
   compactRail: {
     flexShrink: 0,
     width: RAIL_COMPACT_WIDTH,
@@ -162,9 +154,6 @@ type WorkbenchRailProps = {
   readonly directory: string;
   readonly openItems: readonly WorkbenchRailItem[];
   readonly toolItems: readonly WorkbenchRailItem[];
-  readonly sideChatItems: readonly WorkbenchRailItem[];
-  readonly isCreatingSideChat: boolean;
-  readonly onCreateSideChat: () => void;
   readonly onMinimizedChange: (minimized: boolean) => void;
 };
 
@@ -205,15 +194,11 @@ function CompactRail({
   items,
   minimized,
   responsiveCompact,
-  isCreatingSideChat,
-  onCreateSideChat,
   onMinimizedChange,
 }: {
   readonly items: readonly WorkbenchRailItem[];
   readonly minimized: boolean;
   readonly responsiveCompact: boolean;
-  readonly isCreatingSideChat: boolean;
-  readonly onCreateSideChat: () => void;
   readonly onMinimizedChange: (minimized: boolean) => void;
 }): React.ReactElement {
   return (
@@ -233,18 +218,6 @@ function CompactRail({
             </IconButton>
           </Tooltip>
         ))}
-        <Tooltip label="New Side Chat">
-          <IconButton
-            type="button"
-            aria-label="New Side Chat"
-            disabled={isCreatingSideChat}
-            size="md"
-            variant="quiet"
-            onClick={onCreateSideChat}
-          >
-            <Icon icon={IconPlusSmall} size="md" />
-          </IconButton>
-        </Tooltip>
         {minimized && !responsiveCompact ? (
           <Tooltip label="Expand">
             <IconButton
@@ -272,19 +245,14 @@ function WorkbenchRail({
   directory,
   openItems,
   toolItems,
-  sideChatItems,
-  isCreatingSideChat,
-  onCreateSideChat,
   onMinimizedChange,
 }: WorkbenchRailProps): React.ReactElement {
   if (compact) {
     return (
       <CompactRail
-        items={[...toolItems, ...sideChatItems]}
+        items={toolItems}
         minimized={minimized}
         responsiveCompact={responsiveCompact}
-        isCreatingSideChat={isCreatingSideChat}
-        onCreateSideChat={onCreateSideChat}
         onMinimizedChange={onMinimizedChange}
       />
     );
@@ -322,28 +290,6 @@ function WorkbenchRail({
           >
             <div {...stylex.props(styles.railSectionLabel)}>On {workspaceName(directory)}</div>
             {toolItems.map((item) => (
-              <LabeledRailRow key={item.id} item={item} />
-            ))}
-          </div>
-          <div {...stylex.props(styles.railSection, styles.railSectionSpaced)}>
-            <div {...stylex.props(styles.railSectionHeading)}>
-              <div {...stylex.props(styles.railSectionLabel)}>Side chats</div>
-              <div {...stylex.props(styles.railSectionAction)}>
-                <Tooltip label="New Side Chat">
-                  <IconButton
-                    type="button"
-                    aria-label="New Side Chat"
-                    disabled={isCreatingSideChat}
-                    size="sm"
-                    variant="quiet"
-                    onClick={onCreateSideChat}
-                  >
-                    <Icon icon={IconPlusSmall} size="sm" />
-                  </IconButton>
-                </Tooltip>
-              </div>
-            </div>
-            {sideChatItems.map((item) => (
               <LabeledRailRow key={item.id} item={item} />
             ))}
           </div>

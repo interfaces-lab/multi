@@ -21,7 +21,6 @@ import {
 } from "@honk/ui/tokens.stylex";
 import {
   IconChevronLeftMedium,
-  IconClipboard,
   IconConsole,
   IconCrossMedium,
   IconEyeOpen,
@@ -46,13 +45,14 @@ import {
   useCommandMenuSelector,
   type CommandMenuDoor,
 } from "./command-menu-store";
+import { draftKeyOf, writeDraft } from "./chat/composer-store";
+import { useInventory } from "./chat/inventory-store";
 import { canReplayDesktopSetup } from "./desktop-bridge";
 import {
-  isPerformanceMonitorVisible,
+  getPerformanceMonitorVisibility,
   performanceMonitorActions,
   usePerformanceMonitorVisible,
 } from "./performance-monitor";
-import { copySessionDebugInfo } from "./session-debug-info";
 import { ONBOARDING_PATH } from "./onboarding";
 import {
   MENU_DIALOG_STYLE,
@@ -60,14 +60,6 @@ import {
   MENU_FIELD_STYLE,
 } from "./command-menu-layout";
 import { actions as settingsActions } from "./settings-store";
-import {
-  actions as tabActions,
-  getSnapshot as getTabSnapshot,
-  sessionRefForTabKey,
-} from "./tab-store";
-import { actions as toastActions } from "./toast-store";
-import { useSessionInventoryWatchSelector } from "./use-sdk-watch";
-import { getSessionWatchSnapshot } from "./watch-registry";
 
 const MENU_DROP_MAX_HEIGHT = "min(420px, 50dvh)";
 
@@ -199,7 +191,7 @@ function CommandMenuBody({
   const query = useCommandMenuSelector((s) => s.query);
   const selectedIndex = useCommandMenuSelector((s) => s.selectedIndex);
   const submenuStack = useCommandMenuSelector((s) => s.submenuStack);
-  const threads = useSessionInventoryWatchSelector((s) => s.state?.rootSessions ?? EMPTY_THREADS);
+  const threads = useInventory().sessions;
   const monitorVisible = usePerformanceMonitorVisible();
   const navigate = useNavigate();
 
@@ -217,26 +209,23 @@ function CommandMenuBody({
   const safeIndex = selectable.length === 0 ? 0 : Math.min(selectedIndex, selectable.length - 1);
 
   // Focus on mount via callback ref. No useEffect for focus.
-  const inputRef = React.useCallback(
-    (node: HTMLInputElement | null) => {
-      if (node !== null && isOpen) {
-        node.focus();
-      }
-    },
-    [isOpen],
-  );
+  const inputRef = (node: HTMLInputElement | null): void => {
+    if (node !== null && isOpen) {
+      node.focus();
+    }
+  };
 
   const runCommand = (run: CommandMenuCommandId): void => {
     switch (run) {
       case "new-thread": {
+        // A new chat is a Honk Core session; the /chat composer reads the
+        // module draft store, so the typed query lands in it instead of
+        // being dropped with the menu.
         const prompt = query.trim();
-        if (prompt.length === 0) {
-          tabActions.openNew();
-        } else {
-          tabActions.openNew({ prompt });
-        }
+        if (prompt.length > 0) writeDraft(draftKeyOf(null), { text: prompt, images: [] });
         menuActions.close();
         menuActions.setQuery("");
+        void navigate({ to: "/chat" });
         return;
       }
       case "open-settings":
@@ -247,26 +236,6 @@ function CommandMenuBody({
           onSettingsRequest();
         }
         return;
-      case "copy-session-debug-info": {
-        menuActions.close();
-        menuActions.setQuery("");
-        const ref = sessionRefForTabKey(getTabSnapshot().activeKey);
-        if (ref === null) {
-          toastActions.add({
-            type: "error",
-            title: "No active session",
-            description: "Open a session before copying its debug info.",
-          });
-          return;
-        }
-        const watch = getSessionWatchSnapshot(ref);
-        void copySessionDebugInfo({
-          ref,
-          state: watch.state?.app ?? null,
-          watchStatus: watch.status,
-        });
-        return;
-      }
       case "replay-onboarding":
         menuActions.close();
         menuActions.setQuery("");
@@ -290,13 +259,7 @@ function CommandMenuBody({
         runCommand("new-thread");
         return;
       case "thread":
-        tabActions.open({
-          key: item.sessionKey,
-          title: item.title,
-          kind: "thread",
-          status: item.status,
-          repository: { state: "loading" },
-        });
+        void navigate({ to: "/chat/$sessionId", params: { sessionId: item.sessionId } });
         menuActions.close();
         menuActions.setQuery("");
         return;
@@ -508,8 +471,6 @@ function CommandMenuBody({
   );
 }
 
-const EMPTY_THREADS: readonly never[] = Object.freeze([]);
-
 function RowLeading({
   item,
 }: {
@@ -555,12 +516,10 @@ function commandLeadingIcon(run: CommandMenuCommandId) {
   switch (run) {
     case "open-settings":
       return IconSettingsGear2;
-    case "copy-session-debug-info":
-      return IconClipboard;
     case "replay-onboarding":
       return IconConsole;
     case "toggle-performance-monitor":
-      return isPerformanceMonitorVisible() ? IconCrossMedium : IconEyeOpen;
+      return getPerformanceMonitorVisibility() ? IconCrossMedium : IconEyeOpen;
     case "new-thread":
       return IconPlusSmall;
     default: {

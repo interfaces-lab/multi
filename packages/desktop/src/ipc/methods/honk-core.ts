@@ -5,16 +5,17 @@ import * as HonkCoreHost from "../../backend/honk-core-host";
 import * as IpcChannels from "../channels";
 import { makeIpcMethod } from "../desktop-ipc";
 
-const HonkCoreEndpoint = Schema.Struct({
-  baseUrl: Schema.String,
+const HonkCoreConnection = Schema.Struct({
+  url: Schema.String,
+  bearerToken: Schema.String,
 });
 
-export const getHonkCoreEndpoint = makeIpcMethod({
-  channel: IpcChannels.GET_HONK_CORE_ENDPOINT_CHANNEL,
+export const getHonkCoreConnection = makeIpcMethod({
+  channel: IpcChannels.GET_HONK_CORE_CONNECTION_CHANNEL,
   payload: Schema.Void,
-  result: HonkCoreEndpoint,
-  handler: Effect.fn("desktop.ipc.honkCore.getEndpoint")(function* () {
+  result: HonkCoreConnection,
+  handler: Effect.fn("desktop.ipc.honkCore.getConnection")(function* () {
     const host = yield* HonkCoreHost.HonkCoreHost;
-    return { baseUrl: host.baseUrl };
+    return host.connection;
   }),
 });

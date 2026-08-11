@@ -1,944 +1,455 @@
-import {
-  HonkPairingRequestError,
-  openCodeServerKey,
-  previewHonkPairing,
-  type HonkPairingPreview,
-} from "@honk/opencode";
+import { parsePairingUrl, previewPairing } from "@honk/core/access";
+import { Button, Text } from "@honk/ui";
 import { TextField } from "@honk/ui/text-field";
+import * as Clipboard from "expo-clipboard";
 import { CameraView, useCameraPermissions } from "expo-camera";
-import { randomUUID } from "expo-crypto";
 import * as Linking from "expo-linking";
-import { router, useLocalSearchParams, usePathname } from "expo-router";
+import { router, Stack } from "expo-router";
 import * as React from "react";
-import { KeyboardAvoidingView, ScrollView, StyleSheet, View } from "react-native";
+import { ActivityIndicator, ScrollView, StyleSheet, useWindowDimensions, View } from "react-native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 
-import {
-  connectionLinkFromRoute,
-  initialConnectionForm,
-  type ConnectionRouteParams,
-} from "./connection-link-intake";
-import { useConnectionLinkIntake } from "./connection-link-provider";
-import { normalizeRemoteOrigin, parseOpenCodeConnection } from "./pairing";
-import { PairingPersistenceError } from "./pairing-adoption";
-import { createConnectionAttemptFetch, runWithConnectionDeadline } from "./connection-request";
-import { useRemote } from "./remote-context";
-import { ActionButton, BodyText, DetailText, Page, useHonkTheme } from "./ui";
+import { useCoreConnection } from "./core-connection";
+import { useHonkTheme } from "./ui";
 
-interface PendingPairing {
-  readonly origin: string;
-  readonly token: string;
-  readonly preview: HonkPairingPreview;
-  readonly source: PairingRetry["source"];
-  readonly value: string;
-  readonly fallbackOrigin: string;
+function messageOf(cause: unknown, fallback: string): string {
+  return cause instanceof Error && cause.message.trim().length > 0 ? cause.message : fallback;
 }
 
-interface PairingRetry {
-  readonly value: string;
-  readonly fallbackOrigin: string;
-  readonly source: "link" | "manual" | "scan";
-  readonly retryable: boolean;
+interface PairingPreviewState {
+  readonly computerLabel: string;
+  readonly environmentId: string;
 }
 
-const AUTOMATIC_DEVICE_LABEL =
-  process.env.EXPO_OS === "ios"
-    ? "Honk on iOS"
-    : process.env.EXPO_OS === "android"
-      ? "Honk on Android"
-      : "Honk app";
-
-async function loadPendingPairing(
-  value: string,
-  fallbackOrigin: string,
-  source: PairingRetry["source"],
-  controller: AbortController,
-): Promise<PendingPairing> {
-  const candidate = parseOpenCodeConnection(value, fallbackOrigin);
-  if (candidate === null || candidate.credential.type !== "pairing") {
-    throw new Error("Scan a Honk connection code or open a Honk connection link.");
+async function withPreviewDeadline<T>(task: Promise<T>): Promise<T> {
+  let cancelDeadline = (): void => {};
+  const deadline = new Promise<never>((_resolve, reject) => {
+    const timer = setTimeout(
+      () => reject(new Error("Honk could not check this code within 15 seconds.")),
+      15_000,
+    );
+    cancelDeadline = () => clearTimeout(timer);
+  });
+  try {
+    return await Promise.race([task, deadline]);
+  } finally {
+    cancelDeadline();
   }
-  const origin = normalizeRemoteOrigin(candidate.origin);
-  return {
-    origin,
-    token: candidate.credential.value,
-    preview: await runWithConnectionDeadline(controller, () =>
-      previewHonkPairing(
-        origin,
-        candidate.credential.value,
-        createConnectionAttemptFetch({ signal: controller.signal }),
-      ),
-    ),
-    source,
-    value,
-    fallbackOrigin,
-  };
-}
-
-function PairingScanner(props: {
-  readonly permission: { readonly granted: boolean; readonly canAskAgain: boolean } | null;
-  readonly busy: boolean;
-  readonly pending: boolean;
-  readonly scanLocked: boolean;
-  readonly onRequestPermission: () => void;
-  readonly onScan: (value: string) => void;
-  readonly onScanAgain: () => void;
-  readonly onManual: () => void;
-}): React.ReactElement {
-  const theme = useHonkTheme();
-  return (
-    <View style={{ gap: theme.metrics.space.sectionGap }}>
-      <View style={{ gap: theme.metrics.space.contentGap }}>
-        <BodyText
-          accessibilityRole="header"
-          style={{
-            fontSize: theme.metrics.font.titleSize,
-            fontWeight: theme.metrics.font.weightSemibold,
-            lineHeight: theme.metrics.font.titleLeading,
-            textAlign: "center",
-          }}
-        >
-          Scan a Honk code
-        </BodyText>
-        <DetailText style={styles.centerText}>
-          On your computer, choose Connect device, then point this camera at the QR code.
-        </DetailText>
-      </View>
-
-      {props.permission === null ? (
-        <View
-          style={[
-            styles.cameraSurface,
-            styles.permission,
-            {
-              backgroundColor: theme.colors.layer01,
-              borderRadius: theme.metrics.radius.panel,
-              gap: theme.metrics.space.contentGap,
-              padding: theme.metrics.space.panelPad,
-            },
-          ]}
-        >
-          <DetailText accessibilityLiveRegion="polite">Preparing camera…</DetailText>
-        </View>
-      ) : props.permission.granted ? (
-        <View
-          accessible
-          accessibilityLabel="QR code scanner"
-          style={[
-            styles.cameraSurface,
-            styles.cameraFrame,
-            {
-              borderColor: theme.colors.borderBase,
-              borderRadius: theme.metrics.radius.panel,
-            },
-          ]}
-        >
-          <CameraView
-            style={styles.camera}
-            facing="back"
-            barcodeScannerSettings={{ barcodeTypes: ["qr"] }}
-            onBarcodeScanned={
-              props.pending || props.scanLocked ? undefined : ({ data }) => props.onScan(data)
-            }
-          />
-          <View
-            pointerEvents="none"
-            style={[
-              styles.scanGuide,
-              {
-                borderColor: theme.colors.accent,
-                borderRadius: theme.metrics.radius.panel,
-              },
-            ]}
-          />
-        </View>
-      ) : (
-        <View
-          style={[
-            styles.cameraSurface,
-            styles.permission,
-            {
-              backgroundColor: theme.colors.layer01,
-              borderRadius: theme.metrics.radius.panel,
-              gap: theme.metrics.space.contentGap,
-              padding: theme.metrics.space.panelPad,
-            },
-          ]}
-        >
-          <BodyText style={{ fontWeight: theme.metrics.font.weightSemibold }}>
-            Camera access is required
-          </BodyText>
-          <DetailText style={styles.centerText}>
-            Honk only uses the camera to scan a connection code.
-          </DetailText>
-          <ActionButton
-            label={props.permission?.canAskAgain === true ? "Allow camera" : "Open Settings"}
-            onPress={() => {
-              if (props.permission?.canAskAgain !== true) {
-                void Linking.openSettings();
-                return;
-              }
-              props.onRequestPermission();
-            }}
-          />
-        </View>
-      )}
-
-      {props.busy ? (
-        <DetailText accessibilityLiveRegion="polite" style={styles.centerText}>
-          Checking code…
-        </DetailText>
-      ) : null}
-      {props.scanLocked && !props.busy ? (
-        <ActionButton label="Scan again" onPress={props.onScanAgain} />
-      ) : null}
-      <ActionButton label="Enter details manually" tone="neutral" onPress={props.onManual} />
-    </View>
-  );
 }
 
 export function ConnectScreen(): React.ReactElement {
   const theme = useHonkTheme();
-  const pathname = usePathname();
-  const params = useLocalSearchParams<ConnectionRouteParams>();
-  const connectionLinks = useConnectionLinkIntake();
-  const routeConnectionLink = connectionLinkFromRoute(pathname, params);
-  const remote = useRemote();
+  const insets = useSafeAreaInsets();
+  const window = useWindowDimensions();
+  const remote = useCoreConnection();
   const [permission, requestPermission] = useCameraPermissions();
-  const [mode, setMode] = React.useState<"scan" | "manual">("scan");
-  const [form, setForm] = React.useState(() => initialConnectionForm(params, remote.activeServer));
-  const [pairing, setPairing] = React.useState<PendingPairing | null>(null);
+  const [value, setValue] = React.useState("");
   const [busy, setBusy] = React.useState(false);
-  const [openingLink, setOpeningLink] = React.useState(false);
-  const [localError, setLocalError] = React.useState<string | null>(null);
-  const [replacementBlocked, setReplacementBlocked] = React.useState(false);
-  const [retryPairing, setRetryPairing] = React.useState<PairingRetry | null>(null);
-  const [cameraEntryEnabled, setCameraEntryEnabled] = React.useState(false);
+  const [checkingCode, setCheckingCode] = React.useState(false);
+  const [scanLocked, setScanLocked] = React.useState(false);
+  const [preview, setPreview] = React.useState<PairingPreviewState | null>(null);
+  const [message, setMessage] = React.useState<string | null>(null);
+  const busyRef = React.useRef(false);
+  const checkingRef = React.useRef(false);
   const previewGeneration = React.useRef(0);
-  const previewController = React.useRef<AbortController | null>(null);
-  const formOrigin = React.useRef(form.origin);
-  formOrigin.current = form.origin;
-  const scanLocked = React.useRef(false);
-  const cameraRequestStarted = React.useRef(false);
-  const pairingRequestId = React.useRef<string | null>(null);
-  const screenAction = React.useRef(0);
-  const scannerEntryInitialized = React.useRef(false);
-  const claimedConnectionLink = React.useRef<number | null>(null);
+  const previewedUrl = React.useRef<string | null>(null);
 
-  const preparePairing = React.useCallback(
-    (value: string, fallbackOrigin: string, source: PairingRetry["source"]): Promise<boolean> => {
-      previewController.current?.abort(new Error("This connection preview was superseded."));
-      const controller = new AbortController();
-      previewController.current = controller;
-      const generation = ++previewGeneration.current;
-      setBusy(true);
-      setOpeningLink(source === "link");
-      setLocalError(null);
-      setReplacementBlocked(false);
-      setRetryPairing(null);
-      return loadPendingPairing(value, fallbackOrigin, source, controller)
-        .then((next) => {
-          if (generation !== previewGeneration.current) return false;
-          setPairing(next);
-          scanLocked.current = true;
-          return true;
-        })
-        .catch((cause: unknown) => {
-          if (generation !== previewGeneration.current) return false;
-          setLocalError(
-            cause instanceof Error ? cause.message : "The connection code could not be checked.",
-          );
-          setRetryPairing({
-            value,
-            fallbackOrigin,
-            source,
-            retryable: cause instanceof HonkPairingRequestError && cause.kind === "retryable",
-          });
-          return false;
-        })
-        .finally(() => {
-          if (previewController.current === controller) previewController.current = null;
-          if (generation === previewGeneration.current) {
-            setBusy(false);
-            setOpeningLink(false);
-          }
-        });
-    },
-    [],
-  );
-
-  React.useEffect(() => {
-    if (routeConnectionLink === null) return;
-    setCameraEntryEnabled(false);
-    connectionLinks.receive(routeConnectionLink, formOrigin.current);
-  }, [connectionLinks.receive, routeConnectionLink]);
-
-  React.useEffect(() => {
-    const incoming = connectionLinks.pending;
-    if (
-      incoming === null ||
-      remote.status === "restoring" ||
-      remote.pendingPairing !== null ||
-      claimedConnectionLink.current === incoming.deliveryID
-    ) {
+  const inspectPairing = React.useCallback((pairingUrl: string): void => {
+    const candidate = pairingUrl.trim();
+    if (candidate.length === 0 || checkingRef.current) return;
+    setScanLocked(true);
+    setPreview(null);
+    previewedUrl.current = null;
+    const grant = parsePairingUrl(candidate);
+    if (grant === null) {
+      setMessage("Scan a Honk pairing code from your computer.");
       return;
     }
-    claimedConnectionLink.current = incoming.deliveryID;
-    connectionLinks.claim(incoming.deliveryID);
-    setCameraEntryEnabled(false);
-    void preparePairing(incoming.value, incoming.fallbackOrigin, "link");
-  }, [
-    connectionLinks.claim,
-    connectionLinks.pending,
-    preparePairing,
-    remote.pendingPairing,
-    remote.status,
-  ]);
+    checkingRef.current = true;
+    const requestGeneration = ++previewGeneration.current;
+    setCheckingCode(true);
+    setMessage(null);
+    void withPreviewDeadline(previewPairing(grant))
+      .then(
+        (inspected) => {
+          if (requestGeneration !== previewGeneration.current) return;
+          previewedUrl.current = candidate;
+          setPreview({
+            computerLabel: inspected.computerLabel,
+            environmentId: inspected.environmentId,
+          });
+        },
+        (cause: unknown) => {
+          if (requestGeneration !== previewGeneration.current) return;
+          setMessage(messageOf(cause, "Honk could not check this pairing code."));
+        },
+      )
+      .finally(() => {
+        if (requestGeneration === previewGeneration.current) {
+          checkingRef.current = false;
+          setCheckingCode(false);
+        }
+      });
+  }, []);
 
   React.useEffect(() => {
     return () => {
       previewGeneration.current += 1;
-      previewController.current?.abort(new Error("Honk stopped checking this connection code."));
+      checkingRef.current = false;
     };
   }, []);
 
-  React.useEffect(() => {
-    if (
-      scannerEntryInitialized.current ||
-      !connectionLinks.ready ||
-      connectionLinks.pending !== null ||
-      remote.status === "restoring" ||
-      remote.pendingPairing !== null ||
-      openingLink ||
-      pairing !== null ||
-      retryPairing?.source === "link"
-    ) {
-      return;
-    }
-    scannerEntryInitialized.current = true;
-    setCameraEntryEnabled(true);
-  }, [
-    connectionLinks.pending,
-    connectionLinks.ready,
-    openingLink,
-    pairing,
-    remote.pendingPairing,
-    remote.status,
-    retryPairing?.source,
-  ]);
-
-  React.useEffect(() => {
-    if (remote.pendingPairing !== null) {
-      pairingRequestId.current = remote.pendingPairing.requestId;
-      return;
-    }
-    const outcome = remote.pairingOutcome;
-    if (outcome === null || pairingRequestId.current !== outcome.requestId) return;
-    pairingRequestId.current = null;
-    remote.acknowledgePairingOutcome(outcome.requestId);
-    if (outcome.result === "connected") {
-      router.replace("/");
-      return;
-    }
-    if (outcome.result !== "removed") return;
-    scanLocked.current = false;
-    setPairing(null);
-    setRetryPairing(null);
-    setMode("scan");
-    setCameraEntryEnabled(true);
-  }, [remote.acknowledgePairingOutcome, remote.pairingOutcome, remote.pendingPairing]);
-
-  React.useEffect(() => {
-    if (
-      !cameraEntryEnabled ||
-      !connectionLinks.ready ||
-      connectionLinks.pending !== null ||
-      mode !== "scan" ||
-      pairing !== null ||
-      busy ||
-      permission === null ||
-      permission.granted ||
-      !permission.canAskAgain ||
-      cameraRequestStarted.current
-    ) {
-      return;
-    }
-    cameraRequestStarted.current = true;
-    void requestPermission();
-  }, [
-    busy,
-    cameraEntryEnabled,
-    connectionLinks.pending,
-    connectionLinks.ready,
-    mode,
-    pairing,
-    permission,
-    requestPermission,
-  ]);
-
-  // The durable pending request wins over a local preview: Finish acts on the staged
-  // request, so the confirmation must never describe a different scan of the same computer.
-  const confirmation =
-    remote.pendingPairing ??
-    (pairing === null
-      ? null
-      : {
-          origin: pairing.origin,
-          rebindOrigin:
-            pairing.preview.serverId === null
-              ? null
-              : (remote.servers.find(
-                  (server) =>
-                    server.serverId === pairing.preview.serverId &&
-                    server.descriptor.key !== openCodeServerKey(pairing.origin),
-                )?.descriptor.origin ?? null),
-          computerName: pairing.preview.name,
+  const connect = React.useCallback(
+    (pairingUrl: string): void => {
+      const candidate = pairingUrl.trim();
+      if (candidate.length === 0 || busyRef.current) return;
+      if (previewedUrl.current !== candidate) {
+        setMessage("Check the pairing code before connecting.");
+        return;
+      }
+      busyRef.current = true;
+      setBusy(true);
+      setScanLocked(true);
+      setMessage(null);
+      void remote
+        .pair(candidate)
+        .then(
+          () => router.dismissTo("/"),
+          (cause: unknown) => {
+            setMessage(messageOf(cause, "Honk could not connect to this computer."));
+          },
+        )
+        .finally(() => {
+          busyRef.current = false;
+          setBusy(false);
         });
-  const existing =
-    confirmation === null
-      ? null
-      : (remote.servers.find((server) => server.descriptor.origin === confirmation.origin) ?? null);
-  const finishingPairing =
-    confirmation !== null &&
-    remote.pendingPairing?.origin === confirmation.origin &&
-    remote.pendingPairing.status !== "removing";
-  const requestingPairing =
-    confirmation !== null &&
-    remote.pendingPairing?.origin === confirmation.origin &&
-    remote.pendingPairing.status === "requesting";
-  const removingPairing =
-    confirmation !== null &&
-    remote.pendingPairing?.origin === confirmation.origin &&
-    remote.pendingPairing.status === "removing";
-  const rebindConfirmationOrigin = confirmation?.rebindOrigin ?? null;
-  const savedAccessUnavailable = existing?.status === "unauthorized";
-  const requiresSavedAccessRemoval = replacementBlocked || savedAccessUnavailable;
+    },
+    [remote.pair],
+  );
 
-  const connectPairing = (replace: boolean): Promise<void> => {
-    if (!finishingPairing && pairing === null) return Promise.resolve();
-    const attempt = ++screenAction.current;
+  React.useEffect(() => {
+    const incoming = remote.pendingPairingUrl;
+    if (
+      incoming === null ||
+      busyRef.current ||
+      remote.status === "restoring" ||
+      remote.status === "connecting" ||
+      remote.status === "disconnecting" ||
+      remote.status === "forgetting"
+    ) {
+      return;
+    }
+    remote.claimPairingUrl(incoming);
+    setValue(incoming);
+    inspectPairing(incoming);
+  }, [inspectPairing, remote.claimPairingUrl, remote.pendingPairingUrl, remote.status]);
+
+  const retryAttach = React.useCallback((): void => {
+    if (busyRef.current) return;
+    busyRef.current = true;
     setBusy(true);
-    setLocalError(null);
-    const requestId = remote.pendingPairing?.requestId ?? randomUUID();
-    pairingRequestId.current = requestId;
-    const action = finishingPairing
-      ? remote.retryPendingPairing()
-      : pairing === null
-        ? Promise.reject(new Error("Scan a connection code before continuing."))
-        : remote.pair({
-            origin: pairing.origin,
-            serverId: pairing.preview.serverId,
-            token: pairing.token,
-            requestId,
-            serverLabel: pairing.preview.name,
-            deviceLabel: AUTOMATIC_DEVICE_LABEL,
-            defaultDirectory: form.defaultDirectory,
-            replace,
-          });
-    return action
-      .catch((cause: unknown) => {
-        if (screenAction.current !== attempt) return;
-        setLocalError(
-          cause instanceof Error ? cause.message : "This connection could not be finished.",
-        );
-        if (cause instanceof HonkPairingRequestError && cause.kind === "existing-access-invalid") {
-          setReplacementBlocked(true);
-          return;
-        }
-        if (
-          pairing !== null &&
-          ((cause instanceof HonkPairingRequestError && cause.kind === "invalid") ||
-            cause instanceof PairingPersistenceError)
-        ) {
-          setRetryPairing({
-            value: pairing.value,
-            fallbackOrigin: pairing.fallbackOrigin,
-            source: pairing.source,
-            retryable: cause instanceof PairingPersistenceError ? cause.codeReusable : false,
-          });
-          setPairing(null);
-          if (pairing.source === "link") setCameraEntryEnabled(false);
-          if (pairing.source === "scan") setCameraEntryEnabled(true);
-        }
-      })
+    setMessage(null);
+    void remote
+      .retry()
+      .then(
+        () => router.dismissTo("/"),
+        (cause: unknown) => {
+          setMessage(messageOf(cause, "Honk still cannot reach this computer."));
+        },
+      )
       .finally(() => {
-        if (screenAction.current === attempt) setBusy(false);
+        busyRef.current = false;
+        setBusy(false);
       });
-  };
+  }, [remote.retry]);
 
-  const submitManual = (): Promise<void> => {
-    const attempt = ++screenAction.current;
-    setBusy(true);
-    setLocalError(null);
-    return Promise.resolve()
-      .then(() => {
-        const candidate = parseOpenCodeConnection(form.connectionValue, form.origin);
-        if (candidate === null) {
-          throw new Error("Enter a computer password or connection link.");
-        }
-        if (candidate.credential.type === "pairing") {
-          return preparePairing(form.connectionValue, form.origin, "manual").then(() => undefined);
-        }
-        return remote
-          .connect({
-            origin: normalizeRemoteOrigin(candidate.origin),
-            password: candidate.credential.value,
-            defaultDirectory: form.defaultDirectory,
-          })
-          .then(() => router.replace("/"));
-      })
-      .catch((cause: unknown) => {
-        if (screenAction.current !== attempt) return;
-        setLocalError(cause instanceof Error ? cause.message : "The connection failed.");
-      })
-      .finally(() => {
-        if (screenAction.current === attempt) setBusy(false);
-      });
-  };
-
-  const pending =
-    busy ||
-    !connectionLinks.ready ||
-    connectionLinks.pending !== null ||
-    remote.status === "connecting" ||
-    remote.status === "restoring";
-  const checkingConnectionLink = connectionLinks.pending !== null && remote.status === "restoring";
+  const cameraSize = Math.min(
+    420,
+    Math.max(0, window.width - theme.metrics.space.screenGutter * 2),
+  );
+  const savedAttachFailed = remote.status === "error" && remote.connection !== null;
+  const replacementBlocked =
+    preview !== null &&
+    remote.connection !== null &&
+    preview.environmentId !== remote.connection.environmentId;
+  const replacingAccess =
+    preview !== null &&
+    remote.connection !== null &&
+    preview.environmentId === remote.connection.environmentId;
 
   return (
-    <Page>
-      <KeyboardAvoidingView
-        behavior={process.env.EXPO_OS === "ios" ? "padding" : undefined}
-        style={styles.fill}
+    <ScrollView
+      automaticallyAdjustKeyboardInsets
+      contentInsetAdjustmentBehavior="automatic"
+      keyboardDismissMode="interactive"
+      keyboardShouldPersistTaps="handled"
+      style={[styles.page, { backgroundColor: theme.colors.bgBase }]}
+      contentContainerStyle={{
+        flexGrow: 1,
+        gap: theme.metrics.space.sectionGap,
+        paddingBottom: Math.max(insets.bottom, theme.metrics.space.screenGutter),
+        paddingHorizontal: theme.metrics.space.screenGutter,
+        paddingTop: theme.metrics.space.sectionGap,
+      }}
+    >
+      <Stack.Screen options={{ headerBackVisible: remote.connection !== null, title: "Connect" }} />
+
+      <View
+        style={[
+          styles.content,
+          {
+            gap: theme.metrics.space.sectionGap,
+            maxWidth: 560,
+          },
+        ]}
       >
-        <ScrollView
-          contentContainerStyle={[
-            styles.content,
+        <View style={{ gap: theme.metrics.space.contentGap }}>
+          <Text size="lg" weight="semibold" align="center" accessibilityRole="header">
+            Scan a pairing code
+          </Text>
+          <Text tone="muted" align="center">
+            In Honk on your computer, open Settings, choose Connect phone, then scan the QR code.
+            Both devices must be on the same Tailscale network.
+          </Text>
+        </View>
+
+        {savedAttachFailed ? (
+          <View
+            style={[
+              styles.recovery,
+              {
+                backgroundColor: theme.colors.layer01,
+                borderColor: theme.colors.borderBase,
+                borderRadius: theme.metrics.radius.panel,
+                gap: theme.metrics.space.contentGap,
+                padding: theme.metrics.space.panelPad,
+              },
+            ]}
+          >
+            <Text weight="semibold">Saved connection unavailable</Text>
+            <Text tone="muted">
+              Honk could not reach this computer. Try the saved connection before scanning another
+              code.
+            </Text>
+            <Button variant="primary" isPending={busy} onClick={retryAttach}>
+              Try again
+            </Button>
+          </View>
+        ) : null}
+
+        <View
+          style={[
+            styles.cameraFrame,
             {
-              gap: theme.metrics.space.sectionGap,
-              padding: theme.metrics.space.screenGutter,
+              backgroundColor: theme.colors.layer01,
+              borderColor: theme.colors.borderBase,
+              borderRadius: theme.metrics.radius.panel,
+              height: cameraSize,
+              width: cameraSize,
             },
           ]}
-          contentInsetAdjustmentBehavior="automatic"
-          keyboardShouldPersistTaps="handled"
         >
-          {confirmation !== null ? (
-            <View style={[styles.confirmation, { gap: theme.metrics.space.sectionGap }]}>
-              <View style={{ gap: theme.metrics.space.contentGap }}>
-                <BodyText
-                  accessibilityRole="header"
-                  style={{
-                    fontSize: theme.metrics.font.titleSize,
-                    fontWeight: theme.metrics.font.weightSemibold,
-                    lineHeight: theme.metrics.font.titleLeading,
-                    textAlign: "center",
-                  }}
-                >
-                  {removingPairing
-                    ? `Finish removing access to ${confirmation.computerName}`
-                    : finishingPairing
-                      ? `Finish connecting to ${confirmation.computerName}`
-                      : requiresSavedAccessRemoval
-                        ? `Saved access to ${confirmation.computerName} no longer works`
-                        : existing === null
-                          ? `Connect to ${confirmation.computerName}?`
-                          : `Already connected to ${confirmation.computerName}`}
-                </BodyText>
-                <DetailText style={styles.centerText} selectable>
-                  {confirmation.origin}
-                </DetailText>
-                {rebindConfirmationOrigin !== null && !removingPairing ? (
-                  <DetailText style={styles.centerText}>
-                    {`This looks like the computer you already saved at ${rebindConfirmationOrigin}, so connecting here will replace that saved address.`}
-                  </DetailText>
-                ) : null}
-                <DetailText style={styles.centerText}>
-                  {removingPairing
-                    ? "Honk saved this step. Finish removing this connection before scanning a new code."
-                    : requestingPairing
-                      ? "Honk saved this connection request. Finish connecting, or start over to cancel it."
-                      : finishingPairing
-                        ? "The new access is saved on this device. Finish connecting, or start over to remove it and use a new code."
-                        : replacementBlocked
-                          ? "Remove the saved connection on this device, then use this code to connect again. The code has not been used."
-                          : savedAccessUnavailable
-                            ? "First remove this device under Connections on the computer. Then remove the saved connection here and use this code again."
-                            : existing === null
-                              ? "Honk will save access on this device. You can remove it from the computer later."
-                              : "Open the saved connection, or replace its access with this code."}
-                </DetailText>
-              </View>
-              {removingPairing ? (
-                <ActionButton
-                  label="Finish removing access"
-                  pending={pending}
-                  onPress={() => {
-                    const attempt = ++screenAction.current;
-                    pairingRequestId.current = remote.pendingPairing?.requestId ?? null;
-                    setBusy(true);
-                    setLocalError(null);
-                    void remote
-                      .retryPendingPairing()
-                      .catch((cause: unknown) => {
-                        if (screenAction.current !== attempt) return;
-                        setLocalError(
-                          cause instanceof Error
-                            ? cause.message
-                            : "The connection could not be removed.",
-                        );
-                      })
-                      .finally(() => {
-                        if (screenAction.current === attempt) setBusy(false);
-                      });
-                  }}
-                />
-              ) : requiresSavedAccessRemoval && existing !== null ? (
-                <ActionButton
-                  label="Remove saved connection"
-                  pending={pending}
-                  onPress={() => {
-                    setBusy(true);
-                    void remote
-                      .disconnect(existing.descriptor.key)
-                      .then(() => {
-                        setReplacementBlocked(false);
-                        setLocalError(null);
-                      })
-                      .catch((cause: unknown) => {
-                        setLocalError(
-                          cause instanceof Error
-                            ? cause.message
-                            : "The saved connection could not be removed.",
-                        );
-                      })
-                      .finally(() => setBusy(false));
-                  }}
-                />
-              ) : finishingPairing ? (
-                <>
-                  <ActionButton
-                    label="Finish connecting"
-                    pending={pending}
-                    onPress={() => void connectPairing(existing !== null)}
-                  />
-                  <ActionButton
-                    label="Start over"
-                    tone="neutral"
-                    disabled={pending}
-                    onPress={() => {
-                      const attempt = ++screenAction.current;
-                      pairingRequestId.current = remote.pendingPairing?.requestId ?? null;
-                      setBusy(true);
-                      setLocalError(null);
-                      void remote
-                        .cancelPendingPairing()
-                        .catch((cause: unknown) => {
-                          if (screenAction.current !== attempt) return;
-                          setLocalError(
-                            cause instanceof Error
-                              ? cause.message
-                              : "The unfinished access could not be removed.",
-                          );
-                        })
-                        .finally(() => {
-                          if (screenAction.current === attempt) setBusy(false);
-                        });
-                    }}
-                  />
-                </>
-              ) : existing === null ? (
-                <ActionButton
-                  label="Connect"
-                  pending={pending}
-                  onPress={() => void connectPairing(false)}
-                />
-              ) : (
-                <>
-                  <ActionButton
-                    label="Open existing connection"
-                    onPress={() => {
-                      remote.selectServer(existing.descriptor.key);
-                      router.replace("/");
-                    }}
-                  />
-                  <ActionButton
-                    label="Replace access"
-                    tone="neutral"
-                    pending={pending}
-                    onPress={() => void connectPairing(true)}
-                  />
-                </>
-              )}
-              {!finishingPairing && !removingPairing ? (
-                <ActionButton
-                  label="Cancel"
-                  tone="neutral"
-                  onPress={() => {
-                    scanLocked.current = false;
-                    setPairing(null);
-                    setLocalError(null);
-                    setReplacementBlocked(false);
-                    setRetryPairing(null);
-                    setCameraEntryEnabled(true);
-                  }}
-                />
-              ) : null}
+          {permission === null ? (
+            <View style={[styles.cameraFallback, { gap: theme.metrics.space.contentGap }]}>
+              <ActivityIndicator color={theme.colors.accent} />
+              <Text tone="muted" align="center" accessibilityLiveRegion="polite">
+                Preparing camera…
+              </Text>
             </View>
-          ) : !connectionLinks.ready ? (
-            <View style={{ gap: theme.metrics.space.sectionGap }}>
-              <View style={{ gap: theme.metrics.space.contentGap }}>
-                <BodyText
-                  accessibilityRole="header"
-                  style={{
-                    fontSize: theme.metrics.font.titleSize,
-                    fontWeight: theme.metrics.font.weightSemibold,
-                    lineHeight: theme.metrics.font.titleLeading,
-                    textAlign: "center",
-                  }}
-                >
-                  Getting Honk ready
-                </BodyText>
-                <DetailText style={styles.centerText}>
-                  Honk is checking how you opened this screen.
-                </DetailText>
-              </View>
-              <View
-                style={[
-                  styles.cameraSurface,
-                  styles.permission,
-                  {
-                    backgroundColor: theme.colors.layer01,
-                    borderRadius: theme.metrics.radius.panel,
-                    padding: theme.metrics.space.panelPad,
-                  },
-                ]}
-              >
-                <DetailText accessibilityLiveRegion="polite">Preparing…</DetailText>
-              </View>
-            </View>
-          ) : openingLink ||
-            checkingConnectionLink ||
-            (retryPairing?.source === "link" && !cameraEntryEnabled) ? (
-            <View style={{ gap: theme.metrics.space.sectionGap }}>
-              <View style={{ gap: theme.metrics.space.contentGap }}>
-                <BodyText
-                  accessibilityRole="header"
-                  style={{
-                    fontSize: theme.metrics.font.titleSize,
-                    fontWeight: theme.metrics.font.weightSemibold,
-                    lineHeight: theme.metrics.font.titleLeading,
-                    textAlign: "center",
-                  }}
-                >
-                  {openingLink || checkingConnectionLink
-                    ? "Checking this computer"
-                    : "Couldn’t open this connection link"}
-                </BodyText>
-                <DetailText style={styles.centerText}>
-                  {openingLink || checkingConnectionLink
-                    ? "Honk is checking the computer name and address before you choose."
-                    : "Try the link again, or scan a new code from the computer."}
-                </DetailText>
-              </View>
-              <View
-                style={[
-                  styles.cameraSurface,
-                  styles.permission,
-                  {
-                    backgroundColor: theme.colors.layer01,
-                    borderRadius: theme.metrics.radius.panel,
-                    gap: theme.metrics.space.contentGap,
-                    padding: theme.metrics.space.panelPad,
-                  },
-                ]}
-              >
-                <DetailText
-                  accessibilityLiveRegion="polite"
-                  selectable={!openingLink && !checkingConnectionLink}
-                  style={[
-                    styles.centerText,
-                    openingLink || checkingConnectionLink ? null : { color: theme.colors.errFg },
-                  ]}
-                >
-                  {openingLink || checkingConnectionLink ? "Checking connection…" : localError}
-                </DetailText>
-              </View>
-              {!openingLink && !checkingConnectionLink && retryPairing !== null ? (
-                <ActionButton
-                  label={retryPairing.retryable ? "Try link again" : "Scan a new code"}
-                  onPress={() => {
-                    if (retryPairing.retryable) {
-                      void preparePairing(retryPairing.value, retryPairing.fallbackOrigin, "link");
-                      return;
+          ) : permission.granted ? (
+            <CameraView
+              style={styles.camera}
+              facing="back"
+              barcodeScannerSettings={{ barcodeTypes: ["qr"] }}
+              accessibilityLabel="QR code scanner"
+              accessible
+              onBarcodeScanned={
+                busy || checkingCode || scanLocked
+                  ? undefined
+                  : ({ data }) => {
+                      if (busyRef.current || checkingRef.current) return;
+                      setValue(data);
+                      inspectPairing(data);
                     }
-                    scanLocked.current = false;
-                    setMode("scan");
-                    setRetryPairing(null);
-                    setLocalError(null);
-                    setCameraEntryEnabled(true);
-                  }}
-                />
-              ) : null}
-              {!openingLink && !checkingConnectionLink ? (
-                <ActionButton
-                  label="Enter details manually"
-                  tone="neutral"
-                  onPress={() => {
-                    setMode("manual");
-                    setRetryPairing(null);
-                    setLocalError(null);
-                    setCameraEntryEnabled(false);
-                  }}
-                />
-              ) : null}
-            </View>
-          ) : mode === "scan" ? (
-            <PairingScanner
-              permission={permission}
-              busy={busy}
-              pending={pending}
-              scanLocked={scanLocked.current}
-              onRequestPermission={() => void requestPermission()}
-              onScan={(value) => {
-                if (scanLocked.current) return;
-                scanLocked.current = true;
-                void preparePairing(value, "", "scan");
-              }}
-              onScanAgain={() => {
-                scanLocked.current = false;
-                setLocalError(null);
-                setRetryPairing(null);
-              }}
-              onManual={() => {
-                setMode("manual");
-                setLocalError(null);
-                setRetryPairing(null);
-              }}
+              }
             />
           ) : (
-            <View style={{ gap: theme.metrics.space.sectionGap }}>
-              <View style={{ gap: theme.metrics.space.contentGap }}>
-                <BodyText
-                  accessibilityRole="header"
-                  style={{
-                    fontSize: theme.metrics.font.titleSize,
-                    fontWeight: theme.metrics.font.weightSemibold,
-                    lineHeight: theme.metrics.font.titleLeading,
-                  }}
-                >
-                  Enter connection details
-                </BodyText>
-                <DetailText>
-                  Use this fallback when you cannot scan or open a connection link.
-                </DetailText>
-              </View>
-              <View style={{ gap: theme.metrics.space.rowGap }}>
-                <TextField
-                  autoCapitalize="none"
-                  autoComplete="url"
-                  autoCorrect={false}
-                  inputMode="url"
-                  label="Computer address"
-                  onChangeText={(origin) => setForm((current) => ({ ...current, origin }))}
-                  placeholder="https://honk.example.com"
-                  value={form.origin}
-                />
-                <TextField
-                  autoCapitalize="none"
-                  autoComplete="off"
-                  autoCorrect={false}
-                  label="Connection link or computer password"
-                  onChangeText={(connectionValue) =>
-                    setForm((current) => ({ ...current, connectionValue }))
-                  }
-                  placeholder="Paste a connection link or password"
-                  secureTextEntry
-                  value={form.connectionValue}
-                />
-                <TextField
-                  autoCapitalize="none"
-                  autoCorrect={false}
-                  label="Default project folder (optional)"
-                  onChangeText={(defaultDirectory) =>
-                    setForm((current) => ({ ...current, defaultDirectory }))
-                  }
-                  placeholder="/Users/you/Developer/project"
-                  value={form.defaultDirectory}
-                />
-                <ActionButton
-                  label="Connect"
-                  onPress={() => void submitManual()}
-                  pending={pending}
-                />
-                <ActionButton
-                  label="Scan QR code"
-                  tone="neutral"
-                  onPress={() => {
-                    scanLocked.current = false;
-                    setMode("scan");
-                    setLocalError(null);
-                    setRetryPairing(null);
-                    setCameraEntryEnabled(true);
-                  }}
-                />
-              </View>
+            <View style={[styles.cameraFallback, { gap: theme.metrics.space.contentGap }]}>
+              <Text weight="semibold">Camera access is off</Text>
+              <Text tone="muted" align="center">
+                Honk only uses the camera to scan a pairing code. You can also paste the link below.
+              </Text>
+              <Button
+                onClick={() => {
+                  setMessage(null);
+                  const action = permission.canAskAgain
+                    ? requestPermission()
+                    : Linking.openSettings();
+                  void action.catch((cause: unknown) => {
+                    setMessage(messageOf(cause, "Camera settings could not be opened."));
+                  });
+                }}
+              >
+                {permission.canAskAgain ? "Allow camera" : "Open Settings"}
+              </Button>
             </View>
           )}
-
-          {(retryPairing?.source !== "link" || cameraEntryEnabled) &&
-          (localError ?? remote.error) ? (
-            <DetailText
-              accessibilityLiveRegion="polite"
-              selectable
-              style={{ color: theme.colors.errFg }}
-            >
-              {localError ?? remote.error}
-            </DetailText>
+          {busy || checkingCode ? (
+            <View style={[styles.busy, { backgroundColor: theme.colors.scrim }]}>
+              <ActivityIndicator color={theme.colors.accent} />
+              <Text accessibilityLiveRegion="polite">
+                {checkingCode ? "Checking code…" : "Connecting…"}
+              </Text>
+            </View>
           ) : null}
-        </ScrollView>
-      </KeyboardAvoidingView>
-    </Page>
+        </View>
+
+        {preview === null ? null : (
+          <View
+            style={[
+              styles.recovery,
+              {
+                backgroundColor: theme.colors.layer01,
+                borderColor: theme.colors.borderBase,
+                borderRadius: theme.metrics.radius.panel,
+                gap: theme.metrics.space.contentGap,
+                padding: theme.metrics.space.panelPad,
+              },
+            ]}
+          >
+            <Text weight="semibold">
+              {replacementBlocked
+                ? `${preview.computerLabel} is a different computer`
+                : replacingAccess
+                  ? `Replace access for ${preview.computerLabel}?`
+                  : `Connect to ${preview.computerLabel}?`}
+            </Text>
+            <Text tone="muted">
+              {replacementBlocked
+                ? `Disconnect from ${remote.connection?.computerLabel ?? "the saved computer"} before connecting this one.`
+                : replacingAccess
+                  ? "This replaces this phone’s saved access. Continue only if this computer is showing the pairing code."
+                  : "Continue only if this is the computer showing the pairing code."}
+            </Text>
+            {replacementBlocked ? null : (
+              <Button variant="primary" isPending={busy} onClick={() => connect(value)}>
+                {replacingAccess ? "Replace access" : "Connect"}
+              </Button>
+            )}
+          </View>
+        )}
+
+        {scanLocked && !checkingCode && !busy ? (
+          <Button
+            onClick={() => {
+              previewGeneration.current += 1;
+              checkingRef.current = false;
+              previewedUrl.current = null;
+              setPreview(null);
+              setValue("");
+              setMessage(null);
+              setScanLocked(false);
+            }}
+          >
+            Scan again
+          </Button>
+        ) : null}
+
+        <View style={{ gap: theme.metrics.space.contentGap }}>
+          <TextField
+            autoCapitalize="none"
+            autoComplete="off"
+            autoCorrect={false}
+            disabled={busy || checkingCode}
+            inputMode="url"
+            label="Pairing link"
+            onChangeText={(next) => {
+              previewGeneration.current += 1;
+              checkingRef.current = false;
+              previewedUrl.current = null;
+              setCheckingCode(false);
+              setValue(next);
+              setPreview(null);
+              setMessage(null);
+              setScanLocked(false);
+            }}
+            onSubmit={inspectPairing}
+            placeholder="honk://connect…"
+            returnKeyType="go"
+            value={value}
+          />
+          <View style={[styles.actions, { gap: theme.metrics.space.contentGap }]}>
+            <Button
+              disabled={busy || checkingCode}
+              onClick={() => {
+                void Clipboard.getStringAsync().then(
+                  (text) => {
+                    if (text.trim().length === 0) {
+                      setMessage("The clipboard does not contain a pairing link.");
+                      return;
+                    }
+                    previewedUrl.current = null;
+                    setValue(text);
+                    setPreview(null);
+                    setMessage(null);
+                    setScanLocked(false);
+                  },
+                  (cause: unknown) => {
+                    setMessage(messageOf(cause, "Honk could not read the clipboard."));
+                  },
+                );
+              }}
+            >
+              Paste
+            </Button>
+            {preview === null ? (
+              <Button
+                variant="primary"
+                isPending={busy}
+                disabled={checkingCode || value.trim().length === 0}
+                onClick={() => inspectPairing(value)}
+              >
+                Check code
+              </Button>
+            ) : null}
+          </View>
+          {message !== null || (remote.status === "error" && remote.error !== null) ? (
+            <Text
+              tone="err"
+              align="center"
+              accessibilityLiveRegion="assertive"
+              accessibilityRole="alert"
+              selectable
+            >
+              {message ?? remote.error}
+            </Text>
+          ) : null}
+        </View>
+      </View>
+    </ScrollView>
   );
 }
 
 const styles = StyleSheet.create({
-  fill: {
-    flex: 1,
-  },
-  content: {
-    alignSelf: "center",
-    flexGrow: 1,
-    justifyContent: "center",
-    maxWidth: 520,
-    width: "100%",
-  },
-  cameraSurface: {
-    alignSelf: "center",
-    aspectRatio: 1,
-    maxWidth: 440,
-    width: "100%",
-  },
+  page: { flex: 1 },
+  content: { alignSelf: "center", width: "100%" },
   cameraFrame: {
-    borderWidth: 1,
+    alignSelf: "center",
+    borderWidth: StyleSheet.hairlineWidth,
     overflow: "hidden",
   },
-  camera: {
-    flex: 1,
-  },
-  permission: {
+  camera: { flex: 1 },
+  cameraFallback: { alignItems: "center", flex: 1, justifyContent: "center", padding: 24 },
+  busy: {
     alignItems: "center",
+    bottom: 0,
+    gap: 12,
     justifyContent: "center",
-  },
-  scanGuide: {
-    borderWidth: 3,
-    bottom: "18%",
-    left: "18%",
+    left: 0,
     position: "absolute",
-    right: "18%",
-    top: "18%",
+    right: 0,
+    top: 0,
   },
-  confirmation: {
-    alignItems: "stretch",
-  },
-  centerText: {
-    textAlign: "center",
-  },
+  recovery: { borderWidth: StyleSheet.hairlineWidth },
+  actions: { flexDirection: "row", justifyContent: "flex-end" },
 });

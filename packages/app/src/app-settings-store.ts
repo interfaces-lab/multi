@@ -1,5 +1,4 @@
-// App-wide prefs outside mode and preset. null directory defers to the sidecar default.
-// Compact density stays default so OpenCode assistant-message seams stay transport detail.
+// App-wide rendering and notification preferences.
 
 import {
   ConversationDensity,
@@ -17,14 +16,14 @@ import {
 } from "./alert-sound-model";
 import {
   GIT_AGENT_DEFAULT_ACTION,
-  isGitAgentActionId,
+  gitAgentActionIdOf,
   type GitAgentActionId,
 } from "./lib/git-agent-actions";
 
 export type DefaultThreadEnvironment = "local" | "worktree";
 
 export type AppSettings = {
-  /** Absolute path for new threads. null uses the sidecar default. */
+  /** Absolute path for new threads. null asks on the start surface. */
   readonly defaultProjectDirectory: string | null;
   readonly defaultThreadEnvironment: DefaultThreadEnvironment;
   readonly conversationDensity: ConversationDensity;
@@ -325,9 +324,8 @@ function hydrate(): AppSettings {
         typeof parsed.notifyWhenThreadNeedsInput === "boolean"
           ? parsed.notifyWhenThreadNeedsInput
           : DEFAULT_SNAPSHOT.notifyWhenThreadNeedsInput,
-      gitAgentDefaultAction: isGitAgentActionId(parsed.gitAgentDefaultAction)
-        ? parsed.gitAgentDefaultAction
-        : GIT_AGENT_DEFAULT_ACTION,
+      gitAgentDefaultAction:
+        gitAgentActionIdOf(parsed.gitAgentDefaultAction) ?? GIT_AGENT_DEFAULT_ACTION,
     });
   } catch {
     return DEFAULT_SNAPSHOT;

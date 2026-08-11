@@ -1,5 +1,5 @@
-import type { OpenCodeClient } from "@honk/opencode";
 import type { TabDescriptor } from "@honk/ui";
+import { Option, Schema } from "effect";
 import type { ReactNode } from "react";
 
 export type HonkDesktopDispose = () => void;
@@ -47,13 +47,15 @@ export interface HonkDesktopTabsSnapshot {
   readonly activeKey: string;
 }
 
+// The window's open tabs, projected for any extension that renders its own tab
+// surface. `create` takes no anchor: core has no draft tabs, so a new thread
+// always begins at the start page.
 export interface HonkDesktopTabs {
   getSnapshot(): HonkDesktopTabsSnapshot;
   subscribe(listener: () => void): HonkDesktopDispose;
   activate(key: string): void;
   close(key: string): void;
-  create(relativeToKey?: string): void;
-  openDraft(directory: string): void;
+  create(): void;
 }
 
 export interface HonkDesktopSettingsToggleOptions {
@@ -103,6 +105,8 @@ export interface HonkDesktopPanes {
 }
 
 export interface HonkDesktopTitlebar {
+  // An extension that renders tabs elsewhere claims the titlebar strip so the
+  // window never shows both at once.
   tabStrip(options: {
     readonly id: string;
     readonly hidden: HonkDesktopCell<boolean>;
@@ -120,15 +124,10 @@ export interface HonkDesktopPower {
   setKeepAwake(enabled: boolean): Promise<boolean>;
 }
 
-export interface HonkDesktopOpenCode {
-  client(): OpenCodeClient | null;
-}
-
 export interface HonkDesktopExtensionContext {
   readonly id: string;
   readonly lifecycle: HonkDesktopExtensionLifecycle;
   readonly state: HonkDesktopExtensionState;
-  readonly opencode: HonkDesktopOpenCode;
   readonly desktop: {
     readonly power: HonkDesktopPower;
     readonly titlebar: HonkDesktopTitlebar;
@@ -195,10 +194,14 @@ export interface HonkDesktopExtensionHost {
 export interface HonkDesktopExtensionHostOptions {
   readonly storage: Pick<Storage, "getItem" | "setItem">;
   readonly tabs: HonkDesktopTabs;
-  readonly opencode: HonkDesktopOpenCode;
   readonly power: HonkDesktopPower;
   readonly onError?: (error: unknown, extensionID: string) => void;
 }
+
+type InternalTitlebarRecord = {
+  readonly key: string;
+  readonly hidden: HonkDesktopCell<boolean>;
+};
 
 type InternalPaneRecord = {
   readonly key: string;
@@ -211,14 +214,12 @@ type InternalPaneRecord = {
   readonly controller: HonkDesktopPane;
 };
 
-type InternalTitlebarRecord = {
-  readonly key: string;
-  readonly hidden: HonkDesktopCell<boolean>;
-};
-
 const DEFAULT_PANE_MIN_SIZE = 160;
 const DEFAULT_PANE_MAX_SIZE = 800;
 const EXTENSION_ID_PATTERN = /^[a-z0-9][a-z0-9._-]*$/;
+const decodeBoolean = Schema.decodeUnknownOption(Schema.Boolean);
+const decodeFiniteNumber = Schema.decodeUnknownOption(Schema.Finite);
+const decodeString = Schema.decodeUnknownOption(Schema.String);
 
 export function defineHonkDesktopExtension<T extends HonkDesktopExtensionDefinition>(
   extension: T,
@@ -236,7 +237,7 @@ export function createHonkDesktopCell<T>(
   return {
     get: () => value,
     set(next) {
-      const nextValue = typeof next === "function" ? (next as (current: T) => T)(value) : next;
+      const nextValue = next instanceof Function ? next(value) : next;
       if (Object.is(value, nextValue)) {
         return;
       }
@@ -404,8 +405,7 @@ export function createHonkDesktopExtensionHost(
       if (titlebarTabStrips.has(key)) {
         throw new Error(`Duplicate Honk desktop titlebar contribution: ${key}`);
       }
-      const record = Object.freeze({ key, hidden: input.hidden });
-      titlebarTabStrips.set(key, record);
+      titlebarTabStrips.set(key, Object.freeze({ key, hidden: input.hidden }));
       const unsubscribe = input.hidden.subscribe(publishTitlebar);
       publishTitlebar();
       return own(() => {
@@ -448,14 +448,15 @@ export function createHonkDesktopExtensionHost(
       if (minSize <= 0 || maxSize < minSize) {
         throw new Error(`Invalid size range for Honk desktop pane: ${key}`);
       }
+      const openOption = paneOptions.open;
       const open =
-        paneOptions.open === undefined || typeof paneOptions.open === "boolean"
-          ? createHonkDesktopCell(paneOptions.open ?? true)
-          : paneOptions.open;
-      const size =
-        typeof paneOptions.size === "number"
-          ? createHonkDesktopCell(paneOptions.size)
-          : paneOptions.size;
+        openOption === undefined
+          ? createHonkDesktopCell(true)
+          : openOption === true || openOption === false
+            ? createHonkDesktopCell(openOption)
+            : openOption;
+      const sizeOption = paneOptions.size;
+      const size = sizeOption instanceof Object ? sizeOption : createHonkDesktopCell(sizeOption);
       size.set((current) => clampPaneSize(current, minSize, maxSize));
 
       let unsubscribeOpen: HonkDesktopDispose = () => {};
@@ -528,7 +529,6 @@ export function createHonkDesktopExtensionHost(
       id: extension.id,
       lifecycle,
       state: createExtensionState(options.storage, extension.id),
-      opencode: options.opencode,
       desktop: Object.freeze({
         power: options.power,
         titlebar: Object.freeze({ tabStrip: addTitlebarTabStrip, toggle: addTitlebarToggle }),
@@ -540,7 +540,7 @@ export function createHonkDesktopExtensionHost(
 
     try {
       const extensionDispose = extension.activate(context);
-      if (typeof extensionDispose === "function") {
+      if (extensionDispose !== undefined) {
         own(extensionDispose);
       }
     } catch (error) {
@@ -621,7 +621,7 @@ function createExtensionState(
     boolean(key: string, defaultValue: boolean) {
       return create(key, {
         default: defaultValue,
-        decode: (value) => (typeof value === "boolean" ? value : undefined),
+        decode: (value) => Option.getOrUndefined(decodeBoolean(value)),
       });
     },
     number(
@@ -633,20 +633,22 @@ function createExtensionState(
         Math.max(numberOptions.min ?? -Infinity, Math.min(numberOptions.max ?? Infinity, value));
       const cell = create(key, {
         default: clamp(defaultValue),
-        decode: (value) =>
-          typeof value === "number" && Number.isFinite(value) ? clamp(value) : undefined,
+        decode: (value) => {
+          const decoded = Option.getOrUndefined(decodeFiniteNumber(value));
+          return decoded === undefined ? undefined : clamp(decoded);
+        },
       });
       return Object.freeze({
         ...cell,
         set(value: number | ((current: number) => number)) {
-          cell.set((current) => clamp(typeof value === "function" ? value(current) : value));
+          cell.set((current) => clamp(value instanceof Function ? value(current) : value));
         },
       });
     },
     string(key: string, defaultValue: string) {
       return create(key, {
         default: defaultValue,
-        decode: (value) => (typeof value === "string" ? value : undefined),
+        decode: (value) => Option.getOrUndefined(decodeString(value)),
       });
     },
     value<T>(key: string, valueOptions: HonkDesktopStateValueOptions<T>): HonkDesktopCell<T> {

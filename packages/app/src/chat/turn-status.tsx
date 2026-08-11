@@ -13,7 +13,19 @@ import * as React from "react";
 
 import type { TickerState, TurnView } from "./chat-model";
 
-const PLANNING_LABEL = "Planning next move";
+export const PLANNING_LABEL = "Planning next move";
+const SLOW_LABEL = "Still working";
+
+/**
+ * A wait shorter than this is not worth naming: between two tools the window
+ * would otherwise flash "Planning next move" for a frame and swap straight
+ * back. Nothing shows until the pause is long enough to be a pause.
+ */
+export const PLANNING_REVEAL_MS = 200;
+/** Past this the wait is the news, so the window says so and counts. */
+export const PLANNING_SLOW_MS = 15_000;
+/** How often the slow readout re-reads the clock. */
+const SLOW_TICK_MS = 1_000;
 
 // The label swap rides the expand motion token; SWAP_MS is the JS mirror that
 // retires the outgoing label — it must match `--honk-motion-duration-expand`.
@@ -94,13 +106,21 @@ const styles = stylex.create({
 /**
  * The ticker's one line of text, or null when the window should hold its last
  * label — prose streams outside the window as ordinary markdown (spec §5).
+ *
+ * `waitedMs` is how long the planning pause has lasted, or null when there is
+ * no epoch to measure from: a turn's opening thought is legitimately long and
+ * says so at once, where a pause between two tools has to earn its label.
  */
-export const tickerText = (ticker: TickerState): string | null => {
+export const tickerText = (ticker: TickerState, waitedMs: number | null = null): string | null => {
   switch (ticker.kind) {
     case "planning":
-      return PLANNING_LABEL;
+      if (waitedMs === null) return PLANNING_LABEL;
+      if (waitedMs < PLANNING_REVEAL_MS) return null;
+      return waitedMs >= PLANNING_SLOW_MS
+        ? `${SLOW_LABEL} · ${formatWorkedFor(waitedMs)}`
+        : PLANNING_LABEL;
     case "step":
-      return ticker.detail === null ? ticker.name : `${ticker.name} ${ticker.detail}`;
+      return ticker.detail === null ? ticker.verb : `${ticker.verb} ${ticker.detail}`;
     case "rollup":
       return `Read ${String(ticker.count)} files`;
     case "writing":
@@ -115,16 +135,11 @@ export const formatWorkedFor = (durationMs: number): string => {
   if (totalSeconds < 60) return `${String(totalSeconds)}s`;
   const minutes = Math.floor(totalSeconds / 60);
   const seconds = totalSeconds % 60;
-  return seconds === 0
-    ? `${String(minutes)}m`
-    : `${String(minutes)}m ${String(seconds)}s`;
+  return seconds === 0 ? `${String(minutes)}m` : `${String(minutes)}m ${String(seconds)}s`;
 };
 
 /** A stopped or failed turn collapses like a finished one; only the label tells. */
-export const settledLabel = (
-  outcome: TurnView["outcome"],
-  durationMs: number | null,
-): string => {
+export const settledLabel = (outcome: TurnView["outcome"], durationMs: number | null): string => {
   if (outcome === "stopped") return "Stopped";
   if (outcome === "failed") return "Failed";
   return durationMs === null ? "Done" : `Worked for ${formatWorkedFor(durationMs)}`;
@@ -152,8 +167,28 @@ export function TurnStatus({
   outcome,
   durationMs,
 }: TurnStatusProps): React.ReactElement {
+  // The wait's own clock: it only runs while a planning pause is being
+  // measured, and it stops as soon as the next label takes the window.
+  const since = phase === "running" && ticker.kind === "planning" ? ticker.since : null;
+  const [now, setNow] = React.useState(() => Date.now());
+  React.useEffect(() => {
+    if (since === null) return;
+    const reveal = window.setTimeout(() => {
+      setNow(Date.now());
+    }, PLANNING_REVEAL_MS);
+    const tick = window.setInterval(() => {
+      setNow(Date.now());
+    }, SLOW_TICK_MS);
+    return () => {
+      window.clearTimeout(reveal);
+      window.clearInterval(tick);
+    };
+  }, [since]);
+
   const targetText =
-    phase === "settled" ? settledLabel(outcome, durationMs) : tickerText(ticker);
+    phase === "settled"
+      ? settledLabel(outcome, durationMs)
+      : tickerText(ticker, since === null ? null : Math.max(0, now - since));
   const targetKind: SlotKind =
     phase === "settled"
       ? "settled"

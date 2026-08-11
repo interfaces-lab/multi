@@ -1,43 +1,41 @@
-// The coding-accounts step of /setup. Codex sign-in runs the same OpenCode auth
-// flow Settings uses; Claude Code is a read-only probe of the CLI already on
-// this Mac, so it reports state and never offers a control it cannot honor.
+// The coding-accounts step of /setup. Honk Core owns provider discovery,
+// credentials, and sign-in. This step renders the shared model catalog and a
+// step-owned sign-in store in onboarding's scene instead of keeping a second
+// authentication state machine.
 
 import * as stylex from "@stylexjs/stylex";
-import { Badge, Button, Field, Icon, Spinner, Text } from "@honk/ui";
-import { IconClawd, IconOpenaiCodex, IconUserKey } from "@honk/ui/icons";
-import { controlVars, spaceVars } from "@honk/ui/tokens.stylex";
+import { Badge, Button, Spinner, Text } from "@honk/ui";
+import { IconUserKey } from "@honk/ui/icons";
+import { spaceVars } from "@honk/ui/tokens.stylex";
 import * as React from "react";
 
+import type { HonkClient } from "@honk/core";
+
+import { useHonkCore } from "./chat/client";
+import { refreshCatalog, useCatalogPhase } from "./chat/model-catalog";
+import { createProviderAuthStore } from "./provider-auth";
+import { accountProviderRows, ProviderFlowPanel } from "./settings-providers";
 import { SetupFooter, SetupPanel, SetupRow, SetupScene } from "./setup-scene";
-import { providerAuthActions, type OpenAiFlow, useProviderAuth } from "./provider-auth";
 
 const styles = stylex.create({
-  flow: {
-    display: "flex",
-    flexDirection: "column",
-    alignItems: "flex-start",
-    gap: spaceVars["--honk-space-gutter"],
-    padding: spaceVars["--honk-space-panel-pad"],
-  },
   actions: {
     display: "flex",
     flexWrap: "wrap",
     alignItems: "center",
     gap: spaceVars["--honk-space-gutter"],
   },
-  form: {
-    width: "100%",
-    display: "flex",
-    flexDirection: "column",
-    alignItems: "flex-start",
-    gap: spaceVars["--honk-space-gutter"],
-  },
-  note: {
-    display: "flex",
-    alignItems: "center",
-    gap: controlVars["--honk-control-gap"],
-  },
 });
+
+function LoadingAccountsRow(): React.ReactElement {
+  return (
+    <div {...stylex.props(styles.actions)} role="status">
+      <Spinner size="sm" />
+      <Text size="sm" tone="muted">
+        Loading accounts…
+      </Text>
+    </div>
+  );
+}
 
 export function SetupAccountsStep({
   onBack,
@@ -46,234 +44,146 @@ export function SetupAccountsStep({
   readonly onBack: () => void;
   readonly onContinue: () => void;
 }): React.ReactElement {
-  const state = useProviderAuth();
-
+  const core = useHonkCore();
   return (
     <SetupScene
       icon={IconUserKey}
       title="Coding accounts"
-      description="Honk runs threads on whichever of these you sign in to. Both are optional, and both can wait until Settings."
+      description="Connect the accounts Honk can use to run models. You can skip this and connect them later in Settings."
     >
-      <SetupPanel label="Coding accounts">
-        <SetupRow
-          title="Codex"
-          description="Sign in with your OpenAI account to run threads on Codex."
-          control={
-            state.openAiConnected ? (
-              <Badge tone="ok">Connected</Badge>
+      {core.status === "ready" ? (
+        <SetupAccountsBody client={core.client} onBack={onBack} onContinue={onContinue} />
+      ) : (
+        <>
+          <SetupPanel label="Coding accounts">
+            {core.status === "connecting" ? (
+              <LoadingAccountsRow />
             ) : (
+              // No retry: an absent core endpoint is terminal for this host.
+              <SetupRow
+                title="Accounts unavailable"
+                description="Honk Core is not available in this host."
+                control={null}
+              />
+            )}
+          </SetupPanel>
+          <SetupFooter onBack={onBack} onNext={onContinue} nextLabel="Skip for now" />
+        </>
+      )}
+    </SetupScene>
+  );
+}
+
+function SetupAccountsBody({
+  client,
+  onBack,
+  onContinue,
+}: {
+  readonly client: HonkClient;
+  readonly onBack: () => void;
+  readonly onContinue: () => void;
+}): React.ReactElement {
+  // The step retains its store while mounted. Releasing the last owner
+  // cancels any live login stream.
+  const [store] = React.useState(() => createProviderAuthStore(client));
+  React.useEffect(() => store.retain(), [store]);
+  const state = React.useSyncExternalStore(store.subscribe, store.getState, store.getState);
+  const catalog = useCatalogPhase();
+  const flowActive = state.flow !== null;
+
+  // Credentials change behind the app's back (terminal logins, keys added
+  // elsewhere), so re-check when this step opens.
+  React.useEffect(() => {
+    void refreshCatalog();
+  }, []);
+
+  const errorLine = state.error ?? (catalog.status === "ready" ? catalog.error : null);
+
+  return (
+    <>
+      <SetupPanel label="Coding accounts">
+        {catalog.status === "loading" ? <LoadingAccountsRow /> : null}
+        {catalog.status === "failed" ? (
+          <SetupRow
+            title="Accounts unavailable"
+            description={catalog.message}
+            control={
               <Button
                 size="sm"
                 variant="neutral"
-                disabled={state.phase === "unavailable" || state.openAi.kind !== "idle"}
-                iconStart={<Icon icon={IconOpenaiCodex} size="sm" />}
                 onClick={() => {
-                  void providerAuthActions.startOpenAi();
+                  void refreshCatalog();
                 }}
               >
-                Connect
+                Try again
               </Button>
-            )
-          }
-        />
-        <CodexFlow flow={state.openAi} />
-        <SetupRow
-          title="Claude Code"
-          description={claudeDescription(state.claudeConnected)}
-          control={
-            state.claudeConnected === true ? (
-              <Badge tone="ok">Signed in</Badge>
-            ) : (
-              <span {...stylex.props(styles.note)}>
-                <Icon icon={IconClawd} size="sm" tone="faint" />
-                <Text size="sm" tone="faint">
-                  {state.claudeConnected === false ? "Not signed in" : "Checking…"}
-                </Text>
-              </span>
-            )
-          }
-        />
+            }
+          />
+        ) : null}
+        {catalog.status === "ready"
+          ? accountProviderRows(catalog.providers).map((provider) => (
+              <SetupRow
+                key={provider.id}
+                title={provider.name}
+                description={
+                  provider.configured && provider.source !== undefined
+                    ? provider.source
+                    : provider.methods.includes("oauth") && provider.methods.includes("api_key")
+                      ? "Connect with sign-in or an API key."
+                      : provider.methods.includes("oauth")
+                        ? "Connect with sign-in."
+                        : "Connect with an API key."
+                }
+                control={
+                  <div {...stylex.props(styles.actions)}>
+                    <Badge tone={provider.configured ? "ok" : "neutral"}>
+                      {provider.configured ? "Connected" : "Not connected"}
+                    </Badge>
+                    {provider.methods.includes("oauth") ? (
+                      <Button
+                        size="sm"
+                        variant="neutral"
+                        disabled={flowActive}
+                        onClick={() => {
+                          store.beginOauth(provider.id);
+                        }}
+                      >
+                        Sign in
+                      </Button>
+                    ) : null}
+                    {provider.methods.includes("api_key") ? (
+                      <Button
+                        size="sm"
+                        variant="neutral"
+                        disabled={flowActive}
+                        onClick={() => {
+                          store.beginApiKey(provider.id);
+                        }}
+                      >
+                        Add API key
+                      </Button>
+                    ) : null}
+                  </div>
+                }
+              />
+            ))
+          : null}
       </SetupPanel>
-      {state.errorMessage === null ? null : (
+      <ProviderFlowPanel flow={state.flow} store={store} />
+      {errorLine === null ? null : (
         <Text as="p" role="alert" size="sm" tone="err">
-          {state.errorMessage}
+          {errorLine}
         </Text>
       )}
       <SetupFooter
         onBack={onBack}
         onNext={onContinue}
-        nextLabel={state.openAiConnected ? "Next" : "Skip for now"}
+        nextLabel={
+          catalog.status === "ready" && catalog.providers.some((provider) => provider.configured)
+            ? "Next"
+            : "Skip for now"
+        }
       />
-    </SetupScene>
-  );
-}
-
-function claudeDescription(connected: boolean | null): string {
-  if (connected === true) {
-    return "Honk uses the session already signed in on this Mac.";
-  }
-  if (connected === false) {
-    return "Sign in once with the claude CLI and Honk picks that session up.";
-  }
-  return "Checking the claude CLI on this Mac.";
-}
-
-function CodexFlow({ flow }: { readonly flow: OpenAiFlow }): React.ReactElement | null {
-  if (flow.kind === "idle") {
-    return null;
-  }
-
-  if (flow.kind === "authorizing" || flow.kind === "waiting") {
-    return (
-      <div {...stylex.props(styles.flow)}>
-        <div {...stylex.props(styles.actions)}>
-          <Spinner size="sm" />
-          <Text size="sm" tone="muted">
-            Waiting for Codex authorization…
-          </Text>
-        </div>
-        <Button size="sm" variant="quiet" onClick={providerAuthActions.cancelOpenAi}>
-          Cancel
-        </Button>
-      </div>
-    );
-  }
-
-  if (flow.kind === "disconnecting" || flow.kind === "apiKey") {
-    return (
-      <div {...stylex.props(styles.flow)}>
-        <Text size="sm" tone="muted">
-          API keys and disconnect controls live in Settings.
-        </Text>
-        <Button size="sm" variant="quiet" onClick={providerAuthActions.cancelOpenAi}>
-          Cancel
-        </Button>
-      </div>
-    );
-  }
-
-  if (flow.kind === "choosing") {
-    const methods = flow.methods.filter((method) => method.type === "oauth");
-    return (
-      <div {...stylex.props(styles.flow)}>
-        <Text size="sm">Choose a Codex sign-in method</Text>
-        {methods.length === 0 ? (
-          <Text size="sm" tone="muted">
-            Codex sign-in is unavailable right now. Continue, then add an API key in Settings.
-          </Text>
-        ) : (
-          <div {...stylex.props(styles.actions)}>
-            {methods.map((method) => (
-              <Button
-                key={method.id}
-                size="sm"
-                variant="neutral"
-                onClick={() => {
-                  void providerAuthActions.chooseOpenAiMethod(method.id);
-                }}
-              >
-                {method.label}
-              </Button>
-            ))}
-          </div>
-        )}
-        <Button size="sm" variant="quiet" onClick={providerAuthActions.cancelOpenAi}>
-          Cancel
-        </Button>
-      </div>
-    );
-  }
-
-  if (flow.kind === "prompt") {
-    const prompt = flow.cursor.prompt;
-    if (prompt.type === "select") {
-      return (
-        <div {...stylex.props(styles.flow)}>
-          <Text size="sm">{prompt.message}</Text>
-          <div {...stylex.props(styles.actions)}>
-            {prompt.options.map((option) => (
-              <Button
-                key={option.value}
-                size="sm"
-                variant="neutral"
-                onClick={() => {
-                  void providerAuthActions.submitOpenAiPrompt(option.value);
-                }}
-              >
-                {option.label}
-              </Button>
-            ))}
-          </div>
-          <Button size="sm" variant="quiet" onClick={providerAuthActions.cancelOpenAi}>
-            Cancel
-          </Button>
-        </div>
-      );
-    }
-    return (
-      <div {...stylex.props(styles.flow)}>
-        <TextPrompt
-          key={`${flow.method.id}:${String(flow.cursor.index)}`}
-          label={prompt.message}
-          {...(prompt.placeholder === undefined ? {} : { placeholder: prompt.placeholder })}
-          submitLabel="Continue"
-          onSubmit={providerAuthActions.submitOpenAiPrompt}
-        />
-      </div>
-    );
-  }
-
-  return (
-    <div {...stylex.props(styles.flow)}>
-      <TextPrompt
-        label={flow.instructions.length > 0 ? flow.instructions : "Paste the authorization code"}
-        submitLabel="Finish sign in"
-        onSubmit={providerAuthActions.submitOpenAiCode}
-      />
-    </div>
-  );
-}
-
-function TextPrompt({
-  label,
-  placeholder,
-  submitLabel,
-  onSubmit,
-}: {
-  readonly label: string;
-  readonly placeholder?: string;
-  readonly submitLabel: string;
-  readonly onSubmit: (value: string) => Promise<void>;
-}): React.ReactElement {
-  const [value, setValue] = React.useState("");
-  return (
-    <form
-      {...stylex.props(styles.form)}
-      onSubmit={(event) => {
-        event.preventDefault();
-        void onSubmit(value);
-      }}
-    >
-      <Text size="sm">{label}</Text>
-      <Field>
-        <Field.Input
-          autoFocus
-          aria-label={label}
-          value={value}
-          {...(placeholder === undefined ? {} : { placeholder })}
-          onChange={(event) => {
-            setValue(event.currentTarget.value);
-          }}
-        />
-      </Field>
-      <div {...stylex.props(styles.actions)}>
-        <Button size="sm" type="submit" variant="primary" disabled={value.trim().length === 0}>
-          {submitLabel}
-        </Button>
-        <Button size="sm" type="button" variant="quiet" onClick={providerAuthActions.cancelOpenAi}>
-          Cancel
-        </Button>
-      </div>
-    </form>
+    </>
   );
 }

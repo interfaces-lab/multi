@@ -20,9 +20,6 @@ const DIALOG_MAX_HEIGHT = "calc(100dvh - 32px)";
 const DIALOG_MAX_WIDTH = "512px";
 const DIALOG_WIDTH = "calc(100% - 32px)";
 const RING_BASE = `inset 0 0 0 1px ${colorVars["--honk-color-border-base"]}`;
-const NESTED_DIALOG_TOP = `calc(50% + ${spaceVars["--honk-space-panel-pad"]} * var(--nested-dialogs))`;
-// Each open child recedes its parent without changing the child's centered placement.
-const NESTED_DIALOG_SCALE = "calc(1 - 0.08 * var(--nested-dialogs))";
 
 const sx = stylex.create({
   backdrop: {
@@ -50,7 +47,7 @@ const sx = stylex.create({
     boxSizing: "border-box",
     position: "fixed",
     left: "50%",
-    top: NESTED_DIALOG_TOP,
+    top: "50%",
     // Non-conditional translate avoids StyleX conditional-transform unknown typing.
     transform: "translate(-50%, -50%)",
     // Popup must set the same z-index as the scrim. auto would paint under the scrim.
@@ -79,12 +76,12 @@ const sx = stylex.create({
       "[data-ending-style]": 0,
     },
     scale: {
-      default: NESTED_DIALOG_SCALE,
+      default: 1,
       "[data-starting-style]": motionVars["--honk-motion-scale-overlay"],
       "[data-ending-style]": motionVars["--honk-motion-scale-overlay"],
-      "@media (prefers-reduced-motion: reduce)": NESTED_DIALOG_SCALE,
+      "@media (prefers-reduced-motion: reduce)": 1,
     },
-    transitionProperty: "top, opacity, scale",
+    transitionProperty: "opacity, scale",
     transitionTimingFunction: {
       default: motionVars["--honk-motion-ease-out"],
       "[data-ending-style]": motionVars["--honk-motion-ease-in"],

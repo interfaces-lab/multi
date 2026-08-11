@@ -1,8 +1,9 @@
-import type { OpenCodeClient, OpenCodeServerKey } from "@honk/opencode";
+import type { HonkClient } from "@honk/core";
+import type { Workspace } from "@honk/core/workspace";
 import * as React from "react";
 
+import { getHonkClient } from "./chat/client";
 import { errorMessage } from "./error-message";
-import { getOpenCodeClient } from "./watch-registry";
 
 const IMAGE_MEDIA_TYPE_BY_EXTENSION: Readonly<Record<string, string>> = Object.freeze({
   avif: "image/avif",
@@ -33,7 +34,12 @@ type ImagePreviewResource = {
   readonly subscribe: (listener: () => void) => () => void;
 };
 
-type ImagePreviewClient = Pick<OpenCodeClient, "files">;
+// `files.read` answers text (the SVG path) but deliberately carries no bytes
+// for binary files; image bytes travel through `git.fileImage`.
+type ImagePreviewClient = {
+  readonly files: Pick<HonkClient["files"], "read">;
+  readonly git: Pick<HonkClient["git"], "fileImage">;
+};
 type ImagePreviewClientResolver = () => ImagePreviewClient | null;
 
 const INITIAL_IMAGE_PREVIEW_STATE: ImagePreviewState = Object.freeze({ phase: "loading" });
@@ -62,15 +68,12 @@ function base64ByteLength(base64: string): number {
 
 async function loadImagePreview(
   client: ImagePreviewClient,
-  directory: string,
+  workspaceId: Workspace.WorkspaceId,
   path: string,
 ): Promise<ImagePreviewState> {
-  const content = await client.files.read(path, { directory });
-  const mediaType = imageMediaType(path, content.kind === "binary" ? content.mimeType : undefined);
-  if (mediaType === null) {
-    return { phase: "unavailable", message: "This file is not a supported image." };
-  }
-  if (content.kind === "text") {
+  const content = await client.files.read({ workspaceId, path });
+  if (content.type === "text") {
+    const mediaType = imageMediaType(path, undefined);
     if (mediaType !== "image/svg+xml") {
       return { phase: "unavailable", message: "No image preview is available for this file." };
     }
@@ -80,15 +83,23 @@ async function loadImagePreview(
       sizeBytes: new TextEncoder().encode(content.text).byteLength,
     };
   }
+  const image = await client.git.fileImage({ workspaceId, path, ref: "working_tree" });
+  if (image.type === "absent") {
+    return { phase: "unavailable", message: "No image preview is available for this file." };
+  }
+  const mediaType = imageMediaType(path, image.mediaType);
+  if (mediaType === null) {
+    return { phase: "unavailable", message: "This file is not a supported image." };
+  }
   return {
     phase: "ready",
-    src: `data:${mediaType};base64,${content.base64}`,
-    sizeBytes: base64ByteLength(content.base64),
+    src: `data:${mediaType};base64,${image.base64}`,
+    sizeBytes: base64ByteLength(image.base64),
   };
 }
 
 function createImagePreviewResource(
-  directory: string,
+  workspaceId: Workspace.WorkspaceId,
   path: string,
   resolveClient: ImagePreviewClientResolver,
   onRelease?: () => void,
@@ -108,10 +119,10 @@ function createImagePreviewResource(
     requested = true;
     const client = resolveClient();
     if (client === null) {
-      publish({ phase: "error", message: "Honk is not connected to OpenCode." });
+      publish({ phase: "error", message: "Honk Core is not connected yet." });
       return;
     }
-    void loadImagePreview(client, directory, path).then(publish, (error: unknown) => {
+    void loadImagePreview(client, workspaceId, path).then(publish, (error: unknown) => {
       publish({ phase: "error", message: errorMessage(error) });
     });
   };
@@ -140,31 +151,21 @@ function createImagePreviewResource(
 }
 
 function imagePreviewResourceFor(
-  server: OpenCodeServerKey,
-  directory: string,
+  workspaceId: Workspace.WorkspaceId,
   path: string,
 ): ImagePreviewResource {
-  const key = `${server}:${directory}:${path}`;
+  const key = `${workspaceId}:${path}`;
   const existing = imagePreviewResources.get(key);
   if (existing !== undefined) return existing;
-  const created = createImagePreviewResource(
-    directory,
-    path,
-    () => getOpenCodeClient(server),
-    () => {
-      imagePreviewResources.delete(key);
-    },
-  );
+  const created = createImagePreviewResource(workspaceId, path, getHonkClient, () => {
+    imagePreviewResources.delete(key);
+  });
   imagePreviewResources.set(key, created);
   return created;
 }
 
-function useImagePreview(
-  server: OpenCodeServerKey,
-  directory: string,
-  path: string,
-): ImagePreviewState {
-  const resource = imagePreviewResourceFor(server, directory, path);
+function useImagePreview(workspaceId: Workspace.WorkspaceId, path: string): ImagePreviewState {
+  const resource = imagePreviewResourceFor(workspaceId, path);
   return React.useSyncExternalStore(resource.subscribe, resource.getSnapshot, resource.getSnapshot);
 }
 
@@ -175,4 +176,4 @@ export {
   loadImagePreview,
   useImagePreview,
 };
-export type { ImagePreviewResource, ImagePreviewState };
+export type { ImagePreviewClient, ImagePreviewResource, ImagePreviewState };

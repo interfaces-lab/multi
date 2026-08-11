@@ -13,15 +13,10 @@ import {
 import * as React from "react";
 
 import { browserLayout } from "./browser-layout.stylex";
-import type { SubmittedPlanRecord } from "./thread/follow-up";
-import type { PlanExecutionProjection } from "./thread/plan-execution";
 import { workbenchChangesLayout } from "./workbench-changes-layout.stylex";
-import { WorkbenchPlan } from "./workbench-plan";
-import { WorkbenchSideChatSurface } from "./workbench-side-chat-surface";
+import type { WorkbenchSessionRef } from "./workbench-frame";
 import type { WorkbenchTab } from "./workbench-tab-store";
-import { WorkbenchTasks } from "./workbench-tasks";
 import { workbenchTerminalLayout } from "./workbench-terminal-layout.stylex";
-import type { ToolTodo } from "./tool-part-projection";
 
 const DeferredWorkbenchFiles = React.lazy(() =>
   import("./workbench-files").then((module) => ({ default: module.WorkbenchFiles })),
@@ -152,7 +147,7 @@ function BrowserLoading(): React.ReactElement {
 }
 
 function BrowserSurface(props: {
-  readonly sessionRef: Extract<WorkbenchTab, { readonly kind: "browser" }>["owner"];
+  readonly sessionId: Extract<WorkbenchTab, { readonly kind: "browser" }>["owner"];
   readonly directory: string;
   readonly resourceID: string;
   readonly isVisible: boolean;
@@ -207,7 +202,7 @@ function WorkbenchChangesLoading(): React.ReactElement {
 }
 
 function WorkbenchChangesSurface(props: {
-  readonly sessionRef: Extract<WorkbenchTab, { readonly kind: "changes" }>["owner"];
+  readonly sessionRef: WorkbenchSessionRef;
   readonly directory: string;
   readonly isThreadRunning: boolean;
 }): React.ReactElement {
@@ -259,6 +254,7 @@ function WorkbenchFilesLoading(props: {
 }
 
 function WorkbenchFilesSurface(props: {
+  readonly workspaceId: WorkbenchSessionRef["workspaceId"];
   readonly directory: string;
   readonly isThreadRunning: boolean;
   readonly isVisible: boolean;
@@ -278,45 +274,25 @@ function WorkbenchFilesSurface(props: {
 
 function WorkbenchPanelSurface({
   tab,
+  sessionRef,
   directory,
   isThreadRunning,
-  buildAgent,
   isVisible,
-  plan,
-  planExecution,
-  tasks,
   onOpenFile,
-  onReviewChanges,
-  onViewPlan,
 }: {
   readonly tab: WorkbenchTab;
+  readonly sessionRef: WorkbenchSessionRef;
   readonly directory: string;
   readonly isThreadRunning: boolean;
-  readonly buildAgent: string;
   readonly isVisible: boolean;
-  readonly plan: SubmittedPlanRecord | null;
-  readonly planExecution: PlanExecutionProjection | null;
-  readonly tasks: readonly ToolTodo[];
   readonly onOpenFile: (path: string) => void;
-  readonly onReviewChanges: () => void;
-  readonly onViewPlan: () => void;
 }): React.ReactElement {
-  if (tab.kind === "tasks") {
-    return plan === null || planExecution === null ? (
-      <WorkbenchTasks tasks={tasks} />
-    ) : (
-      <WorkbenchPlan
-        agent={buildAgent}
-        execution={planExecution}
-        plan={plan}
-        sessionRef={tab.owner}
-      />
-    );
-  }
   if (tab.kind === "changes") {
+    // The tab's owner is the session that opened it; the workspace frame is the
+    // authority for which session the panel serves now.
     return (
       <WorkbenchChangesSurface
-        sessionRef={tab.owner}
+        sessionRef={sessionRef}
         directory={directory}
         isThreadRunning={isThreadRunning}
       />
@@ -325,6 +301,7 @@ function WorkbenchPanelSurface({
   if (tab.kind === "files") {
     return (
       <WorkbenchFilesSurface
+        workspaceId={sessionRef.workspaceId}
         directory={directory}
         isThreadRunning={isThreadRunning}
         isVisible={isVisible}
@@ -336,6 +313,7 @@ function WorkbenchPanelSurface({
   if (tab.kind === "file") {
     return (
       <WorkbenchFilesSurface
+        workspaceId={sessionRef.workspaceId}
         directory={directory}
         isThreadRunning={isThreadRunning}
         isVisible={isVisible}
@@ -349,23 +327,11 @@ function WorkbenchPanelSurface({
       <WorkbenchTerminalSurface cwd={directory} isVisible={isVisible} terminalID={tab.terminalID} />
     );
   }
-  if (tab.kind === "browser") {
-    return (
-      <BrowserSurface
-        sessionRef={tab.owner}
-        directory={directory}
-        resourceID={tab.browserID}
-        isVisible={isVisible}
-      />
-    );
-  }
   return (
-    <WorkbenchSideChatSurface
-      parentRef={tab.parent}
-      sessionID={tab.child.sessionID}
-      onOpenFile={onOpenFile}
-      onReviewChanges={onReviewChanges}
-      onViewPlan={onViewPlan}
+    <BrowserSurface
+      sessionId={tab.owner}
+      directory={directory}
+      resourceID={tab.browserID}
       isVisible={isVisible}
     />
   );

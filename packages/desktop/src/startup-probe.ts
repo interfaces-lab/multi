@@ -9,7 +9,6 @@ type StartupMilestone =
   | "backend-ready"
   | "browser-window-created"
   | "renderer-ready-to-show"
-  | "renderer-sidecar-ready"
   | "renderer-authenticated";
 
 const enabled = process.env[PROBE_FLAG] === "1";

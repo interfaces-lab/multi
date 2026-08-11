@@ -1,59 +1,64 @@
-import * as React from "react";
-import { useColorScheme } from "react-native";
-import { Stack } from "expo-router";
+import { router, Stack, usePathname } from "expo-router";
 import { DarkTheme, DefaultTheme, ThemeProvider, type Theme } from "expo-router/react-navigation";
 import { StatusBar } from "expo-status-bar";
+import * as React from "react";
+import { useColorScheme } from "react-native";
 import { GestureHandlerRootView } from "react-native-gesture-handler";
 import { KeyboardProvider } from "react-native-keyboard-controller";
-import { useSafeAreaInsets } from "react-native-safe-area-context";
-import { Toaster } from "@honk/ui";
+import { initialWindowMetrics, SafeAreaProvider } from "react-native-safe-area-context";
 
-import { RemoteProvider } from "../src/remote";
-import { ConnectionLinkProvider } from "../src/connection-link-provider";
-import { ManagedRemoteProvider } from "../src/managed-remote-context";
+import { CoreConnectionProvider, useCoreConnection } from "../src/core-connection";
 import { useHonkTheme } from "../src/ui";
 
-function RootNavigator(): React.ReactElement {
-  const theme = useHonkTheme();
-  const insets = useSafeAreaInsets();
-  const mode = useColorScheme() === "dark" ? "dark" : "light";
-  const navigationTheme: Theme = {
-    ...(mode === "dark" ? DarkTheme : DefaultTheme),
+function PairingLinkNavigation(): null {
+  const pathname = usePathname();
+  const { pendingPairingUrl } = useCoreConnection();
+
+  React.useEffect(() => {
+    if (pendingPairingUrl !== null && pathname !== "/connect") router.navigate("/connect");
+  }, [pathname, pendingPairingUrl]);
+
+  return null;
+}
+
+function Navigator(): React.ReactElement {
+  const honkTheme = useHonkTheme();
+  const dark = useColorScheme() === "dark";
+  const base = dark ? DarkTheme : DefaultTheme;
+  const theme: Theme = {
+    ...base,
     colors: {
-      ...(mode === "dark" ? DarkTheme.colors : DefaultTheme.colors),
-      background: theme.colors.bgBase,
-      border: theme.colors.borderBase,
-      card: theme.colors.bgBase,
-      notification: theme.colors.errFg,
-      primary: theme.colors.accent,
-      text: theme.colors.textPrimary,
+      ...base.colors,
+      background: honkTheme.colors.bgBase,
+      border: honkTheme.colors.borderBase,
+      card: honkTheme.colors.bgBase,
+      notification: honkTheme.colors.errFg,
+      primary: honkTheme.colors.accent,
+      text: honkTheme.colors.textPrimary,
     },
   };
   return (
-    <ThemeProvider value={navigationTheme}>
-      <StatusBar style={mode === "dark" ? "light" : "dark"} />
+    <ThemeProvider value={theme}>
+      <StatusBar style={dark ? "light" : "dark"} />
       <Stack
         screenOptions={{
-          contentStyle: { backgroundColor: theme.colors.bgBase },
+          contentStyle: { backgroundColor: honkTheme.colors.bgBase },
           headerShadowVisible: false,
-          headerStyle: { backgroundColor: theme.colors.bgBase },
-          headerTintColor: theme.colors.textPrimary,
+          headerStyle: { backgroundColor: honkTheme.colors.bgBase },
+          headerTintColor: honkTheme.colors.textPrimary,
         }}
       >
-        <Stack.Screen name="index" options={{ headerShown: false }} />
-        <Stack.Screen name="connect" options={{ headerShown: false }} />
-        <Stack.Screen name="pair" options={{ headerShown: false }} />
-        <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
         <Stack.Screen
-          name="new"
-          options={{ presentation: "modal", sheetGrabberVisible: true, title: "New session" }}
+          name="index"
+          options={{
+            headerLargeTitle: true,
+            headerLargeTitleShadowVisible: false,
+            title: "Sessions",
+          }}
         />
-        <Stack.Screen
-          name="session/[serverKey]/[sessionId]/settings"
-          options={{ presentation: "modal", sheetGrabberVisible: true, title: "Session settings" }}
-        />
+        <Stack.Screen name="connect" options={{ title: "Connect" }} />
+        <Stack.Screen name="session/[sessionId]" options={{ title: "Session" }} />
       </Stack>
-      <Toaster topInset={insets.top} />
     </ThemeProvider>
   );
 }
@@ -61,15 +66,14 @@ function RootNavigator(): React.ReactElement {
 export default function RootLayout(): React.ReactElement {
   return (
     <GestureHandlerRootView style={{ flex: 1 }}>
-      <KeyboardProvider>
-        <ManagedRemoteProvider>
-          <RemoteProvider>
-            <ConnectionLinkProvider>
-              <RootNavigator />
-            </ConnectionLinkProvider>
-          </RemoteProvider>
-        </ManagedRemoteProvider>
-      </KeyboardProvider>
+      <SafeAreaProvider initialMetrics={initialWindowMetrics}>
+        <KeyboardProvider>
+          <CoreConnectionProvider>
+            <PairingLinkNavigation />
+            <Navigator />
+          </CoreConnectionProvider>
+        </KeyboardProvider>
+      </SafeAreaProvider>
     </GestureHandlerRootView>
   );
 }

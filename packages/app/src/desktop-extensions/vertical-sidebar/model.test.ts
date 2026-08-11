@@ -4,10 +4,8 @@ import { describe, expect, it } from "vitest";
 import {
   buildWorkspaceDrop,
   collapsedKeySet,
-  decodeStatusFilters,
-  decodeStringList,
   groupWorkspaceTabs,
-  isPathBackedGroup,
+  groupHasPath,
   mergeWorkspaceOrder,
   prunePersistedOrder,
   resolveWorkspaceDrop,
@@ -26,7 +24,6 @@ function thread(
   options: {
     readonly path?: string;
     readonly repository?: SidebarTab["repository"];
-    readonly server?: { readonly label: string; readonly kind: "local" | "remote" | "cloud" };
     readonly status?: SidebarTab["status"];
   } = {},
 ): SidebarTab {
@@ -40,7 +37,6 @@ function thread(
       label: options.path?.split("/").at(-1) ?? "repo",
     },
     ...(options.path === undefined ? {} : { path: options.path }),
-    ...(options.server === undefined ? {} : { server: options.server }),
   };
 }
 
@@ -62,21 +58,12 @@ function ephemeralGroup(key: string): WorkspaceTabGroup {
 }
 
 describe("vertical sidebar model", () => {
-  it("excludes Home and groups path-backed tabs by server and path", () => {
+  it("excludes Home and groups path-backed tabs by path", () => {
     const groups = groupWorkspaceTabs([
       home,
-      thread("local-a", {
-        path: "/repo",
-        server: { label: "This Mac", kind: "local" },
-      }),
-      thread("cloud-a", {
-        path: "/repo",
-        server: { label: "Cloud", kind: "cloud" },
-      }),
-      thread("local-b", {
-        path: "/repo",
-        server: { label: "This Mac", kind: "local" },
-      }),
+      thread("repo-a", { path: "/repo" }),
+      thread("other-a", { path: "/other" }),
+      thread("repo-b", { path: "/repo" }),
     ]);
 
     expect(
@@ -86,15 +73,15 @@ describe("vertical sidebar model", () => {
       })),
     ).toEqual([
       {
-        key: "local:This Mac\u0000/repo",
+        key: "/repo",
         tabs: [
-          ["local-a", 1],
-          ["local-b", 3],
+          ["repo-a", 1],
+          ["repo-b", 3],
         ],
       },
-      { key: "cloud:Cloud\u0000/repo", tabs: [["cloud-a", 2]] },
+      { key: "/other", tabs: [["other-a", 2]] },
     ]);
-    expect(groups.every(isPathBackedGroup)).toBe(true);
+    expect(groups.every(groupHasPath)).toBe(true);
   });
 
   it("uses state and tab key fallbacks for ephemeral workspaces", () => {
@@ -105,11 +92,11 @@ describe("vertical sidebar model", () => {
     ]);
 
     expect(groups.map((entry) => entry.key)).toEqual([
-      "default\u0000loading:loading-a",
-      "default\u0000loading:loading-b",
-      "default\u0000unavailable:error",
+      "loading:loading-a",
+      "loading:loading-b",
+      "unavailable:error",
     ]);
-    expect(groups.some(isPathBackedGroup)).toBe(false);
+    expect(groups.some(groupHasPath)).toBe(false);
   });
 
   it("merges ranked groups first and appends unknown groups in derived order", () => {
@@ -182,18 +169,10 @@ describe("vertical sidebar model", () => {
     ]);
   });
 
-  it("deduplicates valid persisted values and rejects invalid entries", () => {
-    expect(decodeStringList(["one", "one", "two"])).toEqual(["one", "two"]);
-    expect(decodeStringList(["one", 2])).toBeUndefined();
-    expect(decodeStatusFilters(["working", "working", "failed"])).toEqual(["working", "failed"]);
-    expect(decodeStatusFilters(["working", "unknown"])).toBeUndefined();
-    expect(decodeStatusFilters(["working", 2])).toBeUndefined();
-    expect(decodeStatusFilters("working")).toBeUndefined();
-  });
-
   it("matches all tabs without filters and any selected status otherwise", () => {
     expect(tabMatchesFilters(thread("idle"), [])).toBe(true);
-    expect(tabMatchesFilters(thread("idle"), ["working", "failed"])).toBe(false);
+    expect(tabMatchesFilters(thread("idle"), ["working"])).toBe(false);
+    expect(tabMatchesFilters(thread("idle"), ["working", "idle"])).toBe(true);
     expect(tabMatchesFilters(thread("working", { status: "working" }), ["working"])).toBe(true);
   });
 

@@ -16,10 +16,8 @@ async function loadController(stored: string | null, pathname = "/") {
   });
   vi.resetModules();
   const controller = await import("./workbench-controller");
-  const openSessionRoute = vi.spyOn((await import("./tab-store")).actions, "openSessionRoute");
   return {
     actions: controller.workbenchActions,
-    openSessionRoute,
     persisted: () => JSON.parse(entries.get(STORAGE_KEY) ?? "null") as Record<string, unknown>,
   };
 }
@@ -56,7 +54,19 @@ describe("workbench maximized persistence", () => {
     expect(controller.persisted().width).toBe(480);
   });
 
-  it("leaves the preference alone when the chord fires away from a session", async () => {
+  // A stored tab from the removed tool set ("tasks") must fall back rather than
+  // resurrect a tool that no longer exists.
+  it("drops a stored tab that is no longer a workbench tool", async () => {
+    const controller = await loadController(
+      JSON.stringify({ isRailMinimized: false, width: 560, lastTab: "tasks" }),
+    );
+
+    controller.actions.setMaximized(true);
+
+    expect(controller.persisted().lastTab).toBe("changes");
+  });
+
+  it("leaves the preference alone when the chord fires away from a chat thread", async () => {
     const controller = await loadController(
       JSON.stringify({
         isRailMinimized: false,
@@ -71,46 +81,14 @@ describe("workbench maximized persistence", () => {
     expect(controller.persisted().isMaximized).toBe(false);
   });
 
-  it("exits without navigating when the chord fires on an open workbench route", async () => {
+  it("toggles the preference when the chord fires on a chat thread", async () => {
     const controller = await loadController(
       JSON.stringify({ isRailMinimized: false, isMaximized: true, width: 560, lastTab: "changes" }),
-      "/server/aHR0cDovLzEyNy4wLjAuMTo0MDk2/session/ses_a/workbench/changes",
+      "/chat/ses_a",
     );
 
     controller.actions.toggleMaximized();
 
     expect(controller.persisted().isMaximized).toBe(false);
-  });
-
-  it("maximizes the empty workbench without opening the last tool", async () => {
-    const controller = await loadController(
-      JSON.stringify({
-        isRailMinimized: false,
-        isMaximized: false,
-        width: 560,
-        lastTab: "terminal",
-      }),
-      "/server/aHR0cDovLzEyNy4wLjAuMTo0MDk2/session/ses_a/workbench/start",
-    );
-
-    controller.actions.toggleMaximized();
-
-    expect(controller.persisted().isMaximized).toBe(true);
-  });
-});
-
-describe("workbench file navigation", () => {
-  it("opens a transcript file in the current session's workbench", async () => {
-    const controller = await loadController(
-      null,
-      "/server/aHR0cDovLzEyNy4wLjAuMTo0MDk2/session/ses_a",
-    );
-
-    controller.actions.openFile("README.md");
-
-    expect(controller.openSessionRoute).toHaveBeenCalledWith(
-      expect.objectContaining({ sessionID: "ses_a" }),
-      "/server/aHR0cDovLzEyNy4wLjAuMTo0MDk2/session/ses_a/workbench/file%3AUkVBRE1FLm1k",
-    );
   });
 });

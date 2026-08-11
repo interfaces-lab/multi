@@ -7,23 +7,16 @@ import { useSyncExternalStore } from "react";
 import { honkTheme } from "@honk/ui/theme";
 import { colorVars, fontVars, workbenchSurfaceVars } from "@honk/ui/tokens.stylex";
 
+import {
+  APPEARANCE_STORAGE_KEY,
+  readAppearanceBlob,
+  type AppearanceSnapshot,
+  type FontSmoothing,
+  type ThemePreference,
+} from "./appearance-blob";
 import { fontFamilyCssValue, normalizeFontFamily } from "./font-family";
 
-export type ThemePreference = "system" | "light" | "dark";
-
-// "antialiased" = Cursor Glass grayscale AA; "auto" = native/system rendering.
-export type FontSmoothing = "antialiased" | "auto";
-
-export type AppearanceSnapshot = {
-  readonly theme: ThemePreference;
-  readonly tintHue: number;
-  readonly tintIntensity: number;
-  readonly uiFontFamily: string | null;
-  readonly codeFontFamily: string | null;
-  readonly uiFontSize: number;
-  readonly codeFontSize: number;
-  readonly fontSmoothing: FontSmoothing;
-};
+export type { AppearanceSnapshot, FontSmoothing, ThemePreference } from "./appearance-blob";
 
 export const DEFAULT_APPEARANCE: AppearanceSnapshot = Object.freeze({
   theme: "system",
@@ -35,8 +28,6 @@ export const DEFAULT_APPEARANCE: AppearanceSnapshot = Object.freeze({
   codeFontSize: 12,
   fontSmoothing: "antialiased",
 });
-
-const STORAGE_KEY = "honk:app:appearance";
 
 export const UI_FONT_MIN = 11;
 export const UI_FONT_MAX = 23;
@@ -476,53 +467,23 @@ function clamp(value: number, min: number, max: number): number {
 }
 
 function hydrate(): AppearanceSnapshot {
-  if (typeof window === "undefined") {
-    return DEFAULT_APPEARANCE;
-  }
+  const parsed = readAppearanceBlob();
+  if (parsed === null) return DEFAULT_APPEARANCE;
 
-  try {
-    const raw = window.localStorage.getItem(STORAGE_KEY);
-    if (raw === null) {
-      return DEFAULT_APPEARANCE;
-    }
-
-    const parsed = JSON.parse(raw) as Partial<AppearanceSnapshot>;
-    return Object.freeze({
-      theme:
-        parsed.theme === "light" || parsed.theme === "dark" || parsed.theme === "system"
-          ? parsed.theme
-          : DEFAULT_APPEARANCE.theme,
-      tintHue: clamp(
-        typeof parsed.tintHue === "number" ? parsed.tintHue : DEFAULT_APPEARANCE.tintHue,
-        0,
-        360,
-      ),
-      tintIntensity: clamp(
-        typeof parsed.tintIntensity === "number"
-          ? parsed.tintIntensity
-          : DEFAULT_APPEARANCE.tintIntensity,
-        0,
-        100,
-      ),
-      uiFontFamily: normalizeFontFamily(parsed.uiFontFamily),
-      codeFontFamily: normalizeFontFamily(parsed.codeFontFamily),
-      uiFontSize: clamp(
-        typeof parsed.uiFontSize === "number" ? parsed.uiFontSize : DEFAULT_APPEARANCE.uiFontSize,
-        UI_FONT_MIN,
-        UI_FONT_MAX,
-      ),
-      codeFontSize: clamp(
-        typeof parsed.codeFontSize === "number"
-          ? parsed.codeFontSize
-          : DEFAULT_APPEARANCE.codeFontSize,
-        CODE_FONT_MIN,
-        CODE_FONT_MAX,
-      ),
-      fontSmoothing: parsed.fontSmoothing === "auto" ? "auto" : DEFAULT_APPEARANCE.fontSmoothing,
-    });
-  } catch {
-    return DEFAULT_APPEARANCE;
-  }
+  return Object.freeze({
+    theme: parsed.theme ?? DEFAULT_APPEARANCE.theme,
+    tintHue: clamp(parsed.tintHue ?? DEFAULT_APPEARANCE.tintHue, 0, 360),
+    tintIntensity: clamp(parsed.tintIntensity ?? DEFAULT_APPEARANCE.tintIntensity, 0, 100),
+    uiFontFamily: normalizeFontFamily(parsed.uiFontFamily),
+    codeFontFamily: normalizeFontFamily(parsed.codeFontFamily),
+    uiFontSize: clamp(parsed.uiFontSize ?? DEFAULT_APPEARANCE.uiFontSize, UI_FONT_MIN, UI_FONT_MAX),
+    codeFontSize: clamp(
+      parsed.codeFontSize ?? DEFAULT_APPEARANCE.codeFontSize,
+      CODE_FONT_MIN,
+      CODE_FONT_MAX,
+    ),
+    fontSmoothing: parsed.fontSmoothing ?? DEFAULT_APPEARANCE.fontSmoothing,
+  });
 }
 
 function persist(next: AppearanceSnapshot): void {
@@ -531,7 +492,7 @@ function persist(next: AppearanceSnapshot): void {
   }
 
   try {
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
+    window.localStorage.setItem(APPEARANCE_STORAGE_KEY, JSON.stringify(next));
   } catch {
     // Persistence must never break the appearance plane.
   }

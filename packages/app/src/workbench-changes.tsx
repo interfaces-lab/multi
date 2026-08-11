@@ -1,5 +1,5 @@
 import * as stylex from "@stylexjs/stylex";
-import { type OpenCodeSessionRef, type OpenCodeVcsFileStatus } from "@honk/opencode";
+import type { Git } from "@honk/core";
 import { AlertDialog, Button, Checkbox, Icon, IconButton, Menu, Spinner, Text } from "@honk/ui";
 import {
   IconArrowRotateClockwise,
@@ -26,18 +26,15 @@ import {
 import * as React from "react";
 
 import { setDiffWordWrap, setGitAgentDefaultAction, useAppSettings } from "./app-settings-store";
+import { getHonkClient } from "./chat/client";
 import { errorMessage } from "./error-message";
 import {
   GIT_AGENT_ACTIONS,
   GIT_AGENT_ACTION_ORDER,
-  gitAgentActionMetadata,
-  gitAgentPrompt,
   type GitAgentActionId,
 } from "./lib/git-agent-actions";
 import { useGitViewedState } from "./lib/use-git-viewed-state";
 import { useResolvedTheme } from "./lib/use-resolved-theme";
-import { interruptSession } from "./open-code-view";
-import { sendSessionPrompt } from "./session-prompt";
 import { actions as toastActions } from "./toast-store";
 import { WorkbenchChangesCard } from "./workbench-changes-card";
 import { WorkbenchChangesFileTree } from "./workbench-changes-file-tree";
@@ -47,12 +44,12 @@ import {
   type ChangesScope,
   useWorkbenchChangesSnapshot,
 } from "./workbench-changes-resource";
-import { getOpenCodeClient } from "./watch-registry";
+import type { WorkbenchSessionRef } from "./workbench-frame";
 
 const DIFF_STYLE_STORAGE_KEY = "honk:git-diff-style";
 const RAIL_STORAGE_KEY = "honk:git-changes-rail";
 const SCOPE_STORAGE_KEY = "honk:git-changes-scope";
-const EMPTY_FILES: readonly OpenCodeVcsFileStatus[] = Object.freeze([]);
+const EMPTY_FILES: readonly Git.FileChange[] = Object.freeze([]);
 // Cursor fixes the rail header at a structural height beyond Honk's control-height scale.
 const SCOPE_ROW_MIN_HEIGHT = "36px";
 // Cursor's resizable changes rail uses these default, floor, and ceiling measures.
@@ -472,19 +469,14 @@ function WorkbenchChanges({
   directory,
   isThreadRunning,
 }: {
-  readonly sessionRef: OpenCodeSessionRef;
+  readonly sessionRef: WorkbenchSessionRef;
   readonly directory: string;
   readonly isThreadRunning: boolean;
 }): React.ReactElement {
-  const { server, sessionID } = sessionRef;
+  const { sessionId, workspaceId } = sessionRef;
   const [scope, setScopeState] = React.useState<ChangesScope>(readScope);
-  const resource = changesResourceFor({ server, sessionID }, directory, scope);
-  const snapshot = useWorkbenchChangesSnapshot(
-    { server, sessionID },
-    directory,
-    scope,
-    isThreadRunning,
-  );
+  const resource = changesResourceFor(sessionRef, scope);
+  const snapshot = useWorkbenchChangesSnapshot(sessionRef, scope, isThreadRunning);
   const appSettings = useAppSettings();
   const theme = useResolvedTheme();
 
@@ -507,10 +499,12 @@ function WorkbenchChanges({
   // Single-file revert passes [path]; Discard All passes every currently included path. One
   // AlertDialog serves both, its copy keyed on the target count.
   const [revertTarget, setRevertTarget] = React.useState<readonly string[] | null>(null);
+  // Reverting is a typed `git.discard`, not an agent turn, so it carries its own busy flag.
+  const [isDiscarding, setDiscarding] = React.useState(false);
 
   const cardRefs = React.useRef(new Map<string, HTMLDivElement>());
 
-  // `vcs.diff` mode "branch" answers [] when the checkout is the default branch, so the
+  // `git.diff` mode "branch" answers [] when the checkout is the default branch, so the
   // row only exists when the two differ.
   const branch = snapshot.phase === "ready" ? snapshot.branch : null;
   const defaultBranch = snapshot.phase === "ready" ? snapshot.defaultBranch : null;
@@ -599,8 +593,8 @@ function WorkbenchChanges({
 
   const defaultAction = appSettings.gitAgentDefaultAction;
   const includedFiles = filePaths.filter((path) => !excludedPaths.has(path));
-  const actionsBusy = pendingAction !== null;
-  const dispatchDisabled = files.length === 0 || getOpenCodeClient(server) === null;
+  const actionsBusy = pendingAction !== null || isDiscarding;
+  const dispatchDisabled = files.length === 0 || getHonkClient() === null;
 
   // Master checkbox aggregate: both it and the per-file boxes read the one exclusion set.
   const allIncluded = filePaths.length > 0 && includedFiles.length === filePaths.length;
@@ -608,7 +602,7 @@ function WorkbenchChanges({
   const totalAdditions = files.reduce((sum, file) => sum + file.additions, 0);
   const totalDeletions = files.reduce((sum, file) => sum + file.deletions, 0);
 
-  // Row order and gating follow OpenCode's own "Switch source" dialog. "Uncommitted"
+  // Row order and gating follow the native "Switch source" dialog. "Uncommitted"
   // always exists; the merge-base row is labelled from the real base rather than
   // "All Changes", which would promise a distinction Honk cannot draw.
   const uncommittedScope = {
@@ -676,23 +670,26 @@ function WorkbenchChanges({
   };
 
   const runGitAction = (action: GitAgentActionId, actionFiles: readonly string[]): void => {
-    const client = getOpenCodeClient(server);
+    const client = getHonkClient();
     if (client === null) return;
     setPendingAction(action);
-    void sendSessionPrompt(client, sessionID, {
-      text: gitAgentPrompt(action, actionFiles),
-      metadata: gitAgentActionMetadata(action),
-    }).catch((error: unknown) => {
-      setPendingAction(null);
-      const message = errorMessage(error);
-      toastActions.add({
-        type: "error",
-        title: `${GIT_AGENT_ACTIONS[action].label} failed`,
-        description: message,
-        copyableError: message,
-        threadKey: sessionID,
+    void client.session
+      .runGitAction({
+        sessionId,
+        action,
+        ...(actionFiles.length > 0 ? { files: actionFiles } : {}),
+      })
+      .catch((error: unknown) => {
+        setPendingAction(null);
+        const message = errorMessage(error);
+        toastActions.add({
+          type: "error",
+          title: `${GIT_AGENT_ACTIONS[action].label} failed`,
+          description: message,
+          copyableError: message,
+          threadKey: sessionId,
+        });
       });
-    });
   };
 
   // createBranch never stages files; every other split action sends the included paths.
@@ -704,16 +701,48 @@ function WorkbenchChanges({
     dispatchSplitAction(action);
   };
   const stopGitAction = (): void => {
-    const client = getOpenCodeClient(server);
+    const client = getHonkClient();
     if (client === null) return;
-    void interruptSession(client, sessionID).catch(() => {
-      // A failed interrupt leaves the run going; the busy state clears when it ends.
+    void client.session.abort({ sessionId }).catch(() => {
+      // A failed abort leaves the run going; the busy state clears when it ends.
     });
   };
+  // Revert is core's typed `git.discard`: it restores tracked paths from HEAD and
+  // refuses untracked ones, whose only copy deletion would destroy.
   const confirmRevert = (): void => {
-    if (revertTarget === null || revertTarget.length === 0) return;
-    runGitAction("revertFiles", revertTarget);
+    const target = revertTarget;
     setRevertTarget(null);
+    if (target === null || target.length === 0) return;
+    const client = getHonkClient();
+    if (client === null) return;
+    const [first, ...rest] = target;
+    if (first === undefined) return;
+    setDiscarding(true);
+    void client.git
+      .discard({ workspaceId, paths: [first, ...rest] })
+      .then((result) => {
+        if (result.skipped.length > 0) {
+          toastActions.add({
+            type: "error",
+            title: "Untracked files were kept",
+            description: `Reverting would delete the only copy of: ${result.skipped.join(", ")}`,
+          });
+        }
+      })
+      .catch((error: unknown) => {
+        const message = errorMessage(error);
+        toastActions.add({
+          type: "error",
+          title: "Revert failed",
+          description: message,
+          copyableError: message,
+          threadKey: sessionId,
+        });
+      })
+      .finally(() => {
+        setDiscarding(false);
+        resource.refresh();
+      });
   };
 
   // Which comparison the panel is showing, plus that comparison's live totals. The
@@ -876,8 +905,7 @@ function WorkbenchChanges({
     >
       <WorkbenchChangesCard
         file={file}
-        server={server}
-        directory={directory}
+        workspaceId={workspaceId}
         patch={snapshot.diffs.get(file.file)?.patch}
         patchPending={diffsPending}
         diffStyle={diffStyle}

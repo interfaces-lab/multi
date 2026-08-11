@@ -5,66 +5,77 @@
  * @module
  */
 
-import type {
-  AgentHarnessEvent,
-  AgentHarnessOptions,
-  Session as PiSession,
-  SessionTreeEntry,
+import {
+  AgentHarnessError,
+  JsonlSessionRepo,
+  type JsonlSessionMetadata,
+  parseCommandArgs,
+  type Session as PiSession,
 } from "@earendil-works/pi-agent-core";
-import { AgentHarness, AgentHarnessError, JsonlSessionRepo, SessionError } from "@earendil-works/pi-agent-core";
-import type { Models as PiModels } from "@earendil-works/pi-ai";
-import { Context, Effect, Layer, PubSub, Ref, Schema, Stream } from "effect";
+import { Context, Effect, Layer, PubSub, Schema, Stream, SubscriptionRef } from "effect";
 import type { Rpc } from "effect/unstable/rpc";
 
 import { Git } from "../git";
+import { Mcp } from "../mcp";
 import { Models } from "../models";
-import { Tools } from "../tools";
+import { Resources } from "../resources";
 import { Workspace } from "../workspace";
-import { gateTurnFiles, modelOf, turnToolWrites } from "./attribution";
+import { makeCheckpointLedger } from "./checkpoints";
+import {
+  makeDelegationRunner,
+  releaseStaleLock,
+  runAdmitted,
+  runAdmittedPi,
+  runPi,
+  trackPiRun,
+} from "./delegation";
+import { fusionOf, seatingOf, type Pairing } from "./fusion";
+import { PiEntry, PiEvent, PiMessage } from "./contract-foundation";
+import {
+  closeLiveSession,
+  type LiveSession,
+  loadResources,
+  makeLiveSessionRegistry,
+  openLiveSession,
+  readStableBranch,
+  runtimeForBranch,
+  workspaceTrail,
+} from "./runtime";
+import { makeSessionInventory } from "./inventory";
+import { makeSessionPersistence } from "./persistence";
+import { PRESETS, type Preset } from "./subagents";
 import type {
   Abort,
   AbortOutput,
-  ChangesOutput,
   Create,
   Delete,
+  EditMessage,
+  EventsFrame,
   FollowUp,
   Get,
   Interface,
-  ListOutput,
-  PiError,
   Prompt,
+  Reload,
   Revert,
+  RunCommand,
   RunGitAction,
-  RunStatus,
+  RunSkill,
   SessionInfo,
-  SessionSummary,
+  SetModel,
+  SetThinkingLevel,
   SetWorkspace,
   Steer,
-  TurnChanges,
 } from "./contract";
-import { NotFoundError, Rpcs, SessionId } from "./contract";
+import {
+  CreateChoiceError,
+  EditMessageCommittedError,
+  NotFoundError,
+  Rpcs,
+  SessionId,
+} from "./contract";
 import { instructionsFor } from "./git-actions";
-
-/**
- * Runs one Pi operation, keeping Pi's typed failures and Pi's crashes apart.
- *
- * A rejection that is a Pi error class is an expected outcome — a busy
- * harness, steering while idle, a broken session read — and lands on the
- * error channel as itself. Anything else is a bug and stays a defect.
- *
- * Interruption is deliberately not wired to `harness.abort()`: a run belongs
- * to the session, not to the caller that happened to await it, and a client
- * that disconnects mid-prompt must never end work in progress (spec section
- * 10). Ending a run is its own command.
- */
-const runPi = <A>(run: () => Promise<A>): Effect.Effect<A, PiError> =>
-  Effect.tryPromise({ try: run, catch: (cause) => cause }).pipe(
-    Effect.catch((cause) =>
-      cause instanceof AgentHarnessError || cause instanceof SessionError
-        ? Effect.fail(cause)
-        : Effect.die(cause),
-    ),
-  );
+import { messageOptions, replaceMessage } from "./message";
+import { type GenerateSessionTitle, generateModelSessionTitle } from "./title";
 
 /**
  * What {@link layer} needs beyond its services.
@@ -82,86 +93,30 @@ export interface LayerOptions {
    * the workspace trust store and lease use.
    */
   readonly storage: Workspace.ExecutionEnv;
-}
-
-/**
- * Builds the harness for one trusted workspace, with Pi's execution tools
- * bound to that workspace's environment.
- *
- * A top-level helper rather than an inline construction so {@link
- * WorkspaceHarness} can name the resulting type. `AgentHarness` is generic over
- * its tool context and tool union, and both follow from the tools passed here.
- */
-const createWorkspaceHarness = (input: {
-  readonly session: PiSession;
-  readonly models: PiModels;
-  readonly model: AgentHarnessOptions["model"];
-  readonly binding: SessionBinding;
-}) =>
-  new AgentHarness({
-    session: input.session,
-    models: input.models,
-    model: input.model,
-    tools: [...Tools.builtins()],
-    // The provider form of Pi's tool context: resolved at each turn snapshot,
-    // so setWorkspace swaps the binding and the next turn runs in the new
-    // directory while a run already in progress finishes in its old one.
-    toolContext: () => ({ env: input.binding.env }),
-  });
-
-/** The harness type Honk actually opens: Pi's, with execution tools bound. */
-type WorkspaceHarness = ReturnType<typeof createWorkspaceHarness>;
-
-/**
- * Which workspace the session runs in right now.
- *
- * Mutable because `/cd` is an operation, not a new session: the harness reads
- * it through its tool-context provider, and `sdk.files`/`sdk.git` calls keep
- * addressing workspaces by id regardless.
- */
-interface SessionBinding {
-  workspace: Workspace.Info;
-  env: Workspace.ExecutionEnv;
-}
-
-/** One captured checkpoint: which entry settled it, in which workspace's repository. */
-interface Snapshot {
-  readonly entryId: string;
-  readonly workspaceId: Workspace.WorkspaceId;
-}
-
-/**
- * Private host runtime state for one open session.
- *
- * Never serialized and never exposed. Desktop, web, and mobile see commands and
- * Pi values; an `AgentHarness` instance goes only to in-process extensions.
- */
-interface OpenSession {
-  readonly session: PiSession;
-  readonly harness: WorkspaceHarness;
-  readonly events: PubSub.PubSub<AgentHarnessEvent>;
-  readonly binding: SessionBinding;
 
   /**
-   * The session's checkpoint history, in capture order.
-   *
-   * Host bookkeeping, not a second transcript: the snapshots themselves live
-   * in the workspace repository, and this list only remembers which
-   * repository holds each one — which is what lets a session that `/cd`s span
-   * two object stores without guessing.
+   * The subagent catalog. Production ships {@link PRESETS}; tests inject
+   * faux-armed presets so delegation runs deterministically.
    */
-  readonly snapshots: Snapshot[];
+  readonly presets?: readonly Preset[];
 
-  /**
-   * Mutated from Pi's plain event callback, where Effect refs are out of
-   * reach, and read only by `reload`.
-   *
-   * TODO(core-migration effect-v4): `SubscriptionRef` models this properly —
-   * `getUnsafe` for the Pi callback, an Effect read for `reload`, and
-   * `changes` as a stream so status reaches clients without a reload.
-   */
-  readonly run: { status: RunStatus };
+  /** Per-stop overrides on the shipped seating; tests inject faux arms. */
+  readonly pairings?: readonly Pairing[];
+
+  /** Overrides background model title generation; deterministic tests inject this. */
+  readonly generateTitle?: GenerateSessionTitle;
 }
+
+interface SessionAcquisition {
+  readonly session: PiSession<JsonlSessionMetadata>;
+  readonly metadata: JsonlSessionMetadata;
+  readonly id: SessionId;
+  opened: LiveSession | undefined;
+  committed: boolean;
+}
+
+const runLivePi = <A>(sessionId: SessionId, found: LiveSession, run: () => Promise<A>) =>
+  runAdmittedPi(found.lifecycle, () => new NotFoundError({ sessionId }), run);
 
 /**
  * Builds the session service.
@@ -188,264 +143,207 @@ export const layer = (options: LayerOptions) =>
       const workspaces = yield* Workspace.Service;
       const git = yield* Git.Service;
       const models = yield* Models.Service;
+      const mcp = yield* Mcp.Service;
+      const resources = yield* Resources.Service;
 
       // One JSONL transcript per session under <dataDirectory>/sessions,
       // owned by Pi's repository for the core's whole lifetime. The durable
       // truth spec section 9 talks about is these files.
       const repo = new JsonlSessionRepo({ fs: options.storage, sessionsRoot: "sessions" });
 
-      // TODO(core-migration §10, §16): sessions are resources, not map
-      // entries. Nothing ever calls harness.requestShutdown() or
-      // waitForShutdown(), and nothing evicts a closed session, so this map
-      // only grows. The fix is explicit lifecycle — a scoped finalizer that
-      // settles every open harness at host shutdown, plus deliberate
-      // eviction — NOT RcMap: spec/effect.md forbids refcounting a resource
-      // that non-Effect holders (a Pi harness mid-run) still reference.
-      const open = yield* Ref.make<ReadonlyMap<SessionId, OpenSession>>(new Map());
+      // Sessions are resources, not map entries. The scoped registry owns
+      // restore races, deletion tombstones, and parallel harness teardown.
+      const live = yield* makeLiveSessionRegistry;
 
-      /** Reads one session's stored metadata, or nothing if it never existed. */
-      const findMetadata = Effect.fnUntraced(function* (sessionId: SessionId) {
-        const listed = yield* runPi(() => repo.list());
-        return listed.find((metadata) => metadata.id === sessionId);
+      // The "inventory changed" tick: a notification, never a phase source.
+      // Anything that changes what `list` would answer — a session created,
+      // deleted, restored, or changing phase — publishes here, and each
+      // `watchInventory` frame is a fresh authoritative list read. The refs
+      // stay the one phase source (spec section 9); this pubsub only says
+      // "read again".
+      const inventoryChanged = yield* PubSub.unbounded<void>();
+      const presets = options.presets ?? PRESETS;
+      const pairings = seatingOf(options.pairings);
+      const generateTitle: GenerateSessionTitle =
+        options.generateTitle ?? ((input) => generateModelSessionTitle(models.collection, input));
+      const checkpoints = makeCheckpointLedger({ git, workspaces });
+      const inventory = yield* makeSessionInventory({
+        repo,
+        storage: options.storage,
+        workspaces,
+        inventoryChanged,
+        liveSnapshot: live.snapshot,
+        generateTitle,
+      });
+      const persistence = makeSessionPersistence({
+        repo,
+        workspaces,
+        git,
+        models,
+        resources,
+        presets,
+        inventoryChanged,
+        deleted: live.deleted,
+        register: live.register,
       });
 
-      /** The transcript record of one /cd: which workspace the session moved to. */
-      const WorkspaceChangeData = Schema.Struct({ workspaceId: Workspace.WorkspaceId });
+      // Delegation restores linked sessions through the persistence layer's
+      // child-only path. Primary restoration depends on the completed runner,
+      // so the dependency graph is now one-way rather than a delayed callback
+      // from the runner into its own constructor.
+      const runner = makeDelegationRunner<LiveSession>({
+        repo,
+        models,
+        presets,
+        pairings,
+        mcp,
+        liveOf: live.get,
+        register: (sessionId, opened) =>
+          Effect.gen(function* () {
+            const entered = yield* live.register(sessionId, opened);
+            if (entered !== opened) return false;
+            yield* PubSub.publish(inventoryChanged, undefined);
+            return true;
+          }),
+        restore: persistence.restoreLinked,
+        makeLiveSession: (session, binding, model, thinkingLevel, shape, entrySeq) =>
+          openLiveSession({
+            session,
+            origin: { workspace: binding.workspace, env: binding.env },
+            binding,
+            snapshots: [],
+            entrySeq,
+            model,
+            thinkingLevel,
+            shape,
+            models,
+            resources,
+            inventoryChanged,
+          }),
+        closeLiveSession,
+        captureSnapshot: checkpoints.capture,
+        settleSnapshot: checkpoints.settle,
+      });
 
-      /**
-       * Resolves a `honk.workspace_change` entry to a workspace, or nothing.
-       *
-       * Nothing when the entry does not decode or the workspace is gone from
-       * the trust store — a transcript is history, and history may reference
-       * places this host can no longer place.
-       */
-      const workspaceFromChange = Effect.fnUntraced(function* (data: unknown) {
-        const decoded = yield* Schema.decodeUnknownEffect(WorkspaceChangeData)(data).pipe(
-          Effect.orElseSucceed(() => undefined),
+      const restore = (sessionId: SessionId) =>
+        persistence.restore(sessionId, (request) =>
+          request.link === null
+            ? runner.primaryShape(sessionId, fusionOf(request.entries))
+            : Effect.succeed(runner.childShapeFor(request.link.role)),
         );
-        if (decoded === undefined) return undefined;
-        return yield* workspaces
-          .find({ workspaceId: decoded.workspaceId })
-          .pipe(Effect.orElseSucceed(() => undefined));
-      });
-
-      /**
-       * Builds the private runtime state around one Pi session.
-       *
-       * Shared by create and restore, so a restored session gets exactly the
-       * wiring a fresh one does: the harness over the current binding, the
-       * event bridge, and the run status.
-       */
-      const openFromPiSession = Effect.fnUntraced(function* (
-        session: PiSession,
-        binding: SessionBinding,
-        snapshots: Snapshot[],
-        model: AgentHarnessOptions["model"],
-      ) {
-        // TODO(core-migration §7, §12): built-in execution tools only. No
-        // resources, no systemPrompt, no MCP or extension tools yet, and no
-        // setTools(allTools, activeToolNames) recompute - passing
-        // activeToolNames matters there, because Pi retains the previous
-        // active names when it is omitted.
-        const harness = createWorkspaceHarness({
-          session,
-          models: models.collection,
-          model,
-          binding,
-        });
-
-        const events = yield* PubSub.unbounded<AgentHarnessEvent>();
-        const run: OpenSession["run"] = { status: "idle" };
-
-        // Bridge Pi's callback into the PubSub. Events are temporary
-        // notifications: an unbounded pubsub never drops a publish, and
-        // subscribers that lag or detach repair themselves with the next
-        // authoritative reload.
-        harness.subscribe((event) => {
-          if (event.type === "agent_start") run.status = "running";
-          if (event.type === "settled") run.status = "idle";
-          PubSub.publishUnsafe(events, event);
-        });
-
-        return { session, harness, events, run, binding, snapshots } satisfies OpenSession;
-      });
-
-      /**
-       * Walks the transcript's `/cd` records once, answering both questions
-       * a stored session poses: which workspace each entry ran in, and where
-       * the session ended up.
-       */
-      const workspaceTrail = Effect.fnUntraced(function* (
-        entries: readonly SessionTreeEntry[],
-        origin: Workspace.Info,
-      ) {
-        const attributed: Snapshot[] = [{ entryId: "base", workspaceId: origin.id }];
-        let workspace = origin;
-        for (const entry of entries) {
-          if (entry.type === "custom" && entry.customType === "honk.workspace_change") {
-            const target = yield* workspaceFromChange(entry.data);
-            if (target) workspace = target;
-          }
-          attributed.push({ entryId: entry.id, workspaceId: workspace.id });
-        }
-        return { attributed, workspace };
-      });
-
-      /**
-       * Restores a stored session into the open map, or reports it
-       * unrestorable.
-       *
-       * Trust gates restoration exactly as it gates creation: the session's
-       * directory must still be in the trust store, or no environment is
-       * created and the session stays closed. The final workspace binding
-       * comes from the transcript's last `/cd` record, so a restored session
-       * continues where it moved to, not where it began.
-       */
-      const restore = Effect.fnUntraced(function* (sessionId: SessionId) {
-        const metadata = yield* findMetadata(sessionId);
-        if (!metadata) return undefined;
-        const origin = yield* workspaces.locate({ directory: metadata.cwd });
-        if (!origin) return undefined;
-
-        const session = yield* runPi(() => repo.open(metadata));
-        const entries = yield* runPi(() => session.getEntries());
-        const { attributed, workspace } = yield* workspaceTrail(entries, origin);
-
-        // The transcript's own model record, resolved against the live
-        // catalog. A model that left the catalog fails restoration typed —
-        // substituting another would silently move the conversation.
-        const model = yield* models.resolve(modelOf(entries));
-
-        // Snapshot history is what actually survives a restart: checkpoint
-        // refs in the workspace repositories, intersected with the transcript
-        // in transcript order. Nothing is stored twice.
-        const captured = new Map<Workspace.WorkspaceId, ReadonlySet<string>>();
-        for (const workspaceId of new Set(attributed.map((snapshot) => snapshot.workspaceId))) {
-          const names = yield* git
-            .checkpoints({ workspaceId, prefix: sessionId })
-            .pipe(Effect.orElseSucceed((): Git.CheckpointsOutput => ({ checkpoints: [] })));
-          captured.set(
-            workspaceId,
-            new Set(names.checkpoints.map((name) => name.slice(sessionId.length + 1))),
-          );
-        }
-        const snapshots = attributed.filter(
-          (snapshot) => captured.get(snapshot.workspaceId)?.has(snapshot.entryId) ?? false,
-        );
-
-        // The id came out of the trust store an instant ago; a miss here is a
-        // bug, not an outcome.
-        const env = yield* workspaces.env({ workspaceId: workspace.id }).pipe(Effect.orDie);
-        const opened = yield* openFromPiSession(session, { workspace, env }, snapshots, model);
-
-        // Two concurrent restores converge on one instance; the loser's
-        // harness is dropped unused before it ever ran anything.
-        return yield* Ref.modify(open, (map) => {
-          const raced = map.get(sessionId);
-          if (raced) return [raced, map] as const;
-          return [opened, new Map(map).set(sessionId, opened)] as const;
-        });
-      });
 
       const lookup = Effect.fnUntraced(function* (sessionId: SessionId) {
-        const found = (yield* Ref.get(open)).get(sessionId);
+        const found = yield* live.get(sessionId);
         if (found) return found;
         // Lazy restore: the first use after a restart reopens the session.
         const restored = yield* restore(sessionId);
         if (!restored) return yield* new NotFoundError({ sessionId });
         return restored;
       });
-
-      /**
-       * Captures a checkpoint for this session and remembers where it lives.
-       *
-       * Failures are swallowed on purpose: a workspace without a git
-       * repository has no checkpoints, and snapshot bookkeeping must never
-       * fail the run that triggered it. A capture that did not happen is
-       * simply not recorded, so `changes` stays honest instead of pointing at
-       * refs that do not exist.
-       */
-      const captureSnapshot = Effect.fnUntraced(function* (
-        sessionId: SessionId,
-        found: OpenSession,
-        entryId: string,
-      ) {
-        const workspaceId = found.binding.workspace.id;
-        const captured = yield* git
-          .captureCheckpoint({ workspaceId, checkpoint: `${sessionId}/${entryId}` })
-          .pipe(
-            Effect.as(true),
-            Effect.orElseSucceed(() => false),
-          );
-        if (!captured) return;
-        const last = found.snapshots.at(-1);
-        if (last !== undefined && last.entryId === entryId && last.workspaceId === workspaceId) {
-          return;
-        }
-        found.snapshots.push({ entryId, workspaceId });
-      });
-
-      /** Snapshots the settled state under the turn's last entry id. */
-      const settleSnapshot = Effect.fnUntraced(function* (
-        sessionId: SessionId,
-        found: OpenSession,
-      ) {
-        const entries = yield* runPi(() => found.session.getEntries());
-        yield* captureSnapshot(sessionId, found, entries.at(-1)?.id ?? "base");
-      });
+      const findMetadata = persistence.findMetadata;
+      const captureSnapshot = checkpoints.capture;
+      const settleSnapshot = checkpoints.settle;
 
       const create = Effect.fn("Session.create")(function* (input: Rpc.Payload<typeof Create>) {
         const workspace = yield* workspaces.find({ workspaceId: input.workspaceId });
-        // Resolve the model before anything persists: a reference that fails
-        // must not leave an orphan transcript behind.
-        const model = yield* models.resolve(input.model);
-        // The session's transcript is rooted in its workspace from the first
-        // byte: Pi stores the cwd in the session metadata, and that stored
-        // directory is what restoration resolves through the trust store.
-        const session = yield* runPi(() => repo.create({ cwd: workspace.directory }));
-        const metadata = yield* runPi(() => session.getMetadata());
-        const id = SessionId.make(metadata.id);
-
-        // The choice is durable from birth: Pi's own model_change entry is
-        // what restoration reads, so the session reopens on the model it was
-        // created with — even when it was the resolved default.
-        yield* runPi(() => session.appendModelChange(model.provider, model.id));
-
-        // One environment per trusted workspace, shared with sdk.files and
-        // sdk.git, so all three resolve against the same directory and a
-        // caller cannot reach outside it by choosing a different built-in.
-        const env = yield* workspaces.env({ workspaceId: workspace.id });
-        const opened = yield* openFromPiSession(session, { workspace, env }, [], model);
-
-        // The base checkpoint: the workspace as this session found it, so the
-        // first turn has something to diff against and "base" is a revert
-        // target meaning "before this conversation touched anything".
-        yield* captureSnapshot(id, opened, "base");
-
-        yield* Ref.update(open, (map) => new Map(map).set(id, opened));
-        return { id, workspaceId: workspace.id };
-      });
-
-      const list = Effect.fn("Session.list")(function* () {
-        const listed = yield* runPi(() => repo.list());
-        const sessions: SessionSummary[] = [];
-        for (const metadata of listed) {
-          const located = yield* workspaces.locate({ directory: metadata.cwd });
-          // A session whose directory left the trust store is unplaceable:
-          // listing it would invite an open the trust gate must refuse.
-          if (!located) continue;
-          sessions.push({
-            id: SessionId.make(metadata.id),
-            workspaceId: located.id,
-            directory: located.directory,
-            createdAt: metadata.createdAt,
-          });
+        // A stop decides both seats, so it excludes the model and thinking level.
+        if (
+          input.fusion !== undefined &&
+          (input.model !== undefined || input.thinkingLevel !== undefined)
+        ) {
+          return yield* new CreateChoiceError({});
         }
-        return { sessions } satisfies ListOutput;
+        const pairing = input.fusion === undefined ? null : pairings[input.fusion];
+        // Resolve every arm before creating a transcript.
+        const model =
+          pairing === null
+            ? yield* models.resolveAvailable(input.model)
+            : yield* runner.armModel(pairing.main.model);
+        const thinkingLevel = pairing === null ? input.thinkingLevel : pairing.main.thinkingLevel;
+        if (pairing !== null) yield* runner.armModel(pairing.sidekick.model);
+        return yield* Effect.acquireUseRelease(
+          Effect.gen(function* () {
+            const session = yield* runPi(() => repo.create({ cwd: workspace.directory }));
+            const metadata = yield* runPi(() => session.getMetadata());
+            const created: SessionAcquisition = {
+              session,
+              metadata,
+              id: SessionId.make(metadata.id),
+              opened: undefined,
+              committed: false,
+            };
+            return created;
+          }),
+          (created) =>
+            Effect.gen(function* () {
+              // Pi's own entries are the durable source for restore. Fusion's
+              // stop is explicit because two stops may share an arm.
+              yield* runPi(() => created.session.appendModelChange(model.provider, model.id));
+              if (thinkingLevel !== undefined) {
+                yield* runPi(() => created.session.appendThinkingLevelChange(thinkingLevel));
+              }
+              if (pairing !== null) {
+                yield* runPi(() =>
+                  created.session.appendCustomEntry("honk.fusion", { stop: pairing.stop }),
+                );
+              }
+              const entrySeq = (yield* runPi(() => created.session.getEntries())).length;
+
+              const env = yield* workspaces.env({ workspaceId: workspace.id });
+              const shape = yield* runner.primaryShape(
+                created.id,
+                pairing === null ? null : pairing.stop,
+              );
+              const liveSession = yield* openLiveSession({
+                session: created.session,
+                origin: { workspace, env },
+                binding: { workspace, env },
+                snapshots: [],
+                entrySeq,
+                model,
+                thinkingLevel,
+                shape,
+                models,
+                resources,
+                inventoryChanged,
+              });
+              created.opened = liveSession;
+
+              // "base" is the workspace before this conversation changed it.
+              yield* captureSnapshot(created.id, liveSession, "base");
+
+              // Registration and ownership transfer are one uninterruptible
+              // step: cleanup must never delete a session the registry owns.
+              yield* Effect.uninterruptible(
+                Effect.gen(function* () {
+                  const registered = yield* live.register(created.id, liveSession);
+                  if (registered !== liveSession) {
+                    created.opened = undefined;
+                    return yield* Effect.die(new Error(`Session id collision: ${created.id}`));
+                  }
+                  created.committed = true;
+                  yield* PubSub.publish(inventoryChanged, undefined);
+                }),
+              );
+              return { id: created.id, workspaceId: workspace.id };
+            }),
+          (created) =>
+            created.committed
+              ? Effect.void
+              : Effect.gen(function* () {
+                  if (created.opened !== undefined) yield* closeLiveSession(created.opened);
+                  yield* git
+                    .deleteCheckpoints({ workspaceId: workspace.id, prefix: created.id })
+                    .pipe(Effect.ignore);
+                  yield* runPi(() => repo.delete(created.metadata)).pipe(Effect.ignore);
+                }),
+        );
       });
+
+      const list = inventory.list;
 
       const get = Effect.fn("Session.get")(function* (input: Rpc.Payload<typeof Get>) {
-        const opened = (yield* Ref.get(open)).get(input.sessionId);
+        const opened = yield* live.get(input.sessionId);
         if (opened) {
           return {
             id: input.sessionId,
@@ -465,16 +363,11 @@ export const layer = (options: LayerOptions) =>
       const remove = Effect.fn("Session.delete")(function* (input: Rpc.Payload<typeof Delete>) {
         const metadata = yield* findMetadata(input.sessionId);
         if (!metadata) return yield* new NotFoundError({ sessionId: input.sessionId });
-        const opened = (yield* Ref.get(open)).get(input.sessionId);
+        const opened = yield* live.remove(input.sessionId);
         if (opened) {
           // End the run before its transcript disappears under it. A failed
           // abort must not block deletion — the user asked for gone.
-          yield* runPi(() => opened.harness.abort()).pipe(Effect.ignore);
-          yield* Ref.update(open, (map) => {
-            const next = new Map(map);
-            next.delete(input.sessionId);
-            return next;
-          });
+          yield* closeLiveSession(opened);
         }
 
         // Every repository this session snapshotted into: the live list when
@@ -492,7 +385,7 @@ export const layer = (options: LayerOptions) =>
           if (!origin) return ids;
           const session = yield* runPi(() => repo.open(metadata));
           const entries = yield* runPi(() => session.getEntries());
-          const { attributed } = yield* workspaceTrail(entries, origin);
+          const { attributed } = yield* workspaceTrail(workspaces, entries, origin);
           for (const snapshot of attributed) ids.add(snapshot.workspaceId);
           return ids;
         }).pipe(Effect.orElseSucceed(() => new Set<Workspace.WorkspaceId>()));
@@ -504,11 +397,43 @@ export const layer = (options: LayerOptions) =>
           { discard: true },
         );
         yield* runPi(() => repo.delete(metadata));
+        yield* inventory.forget(input.sessionId);
+        yield* PubSub.publish(inventoryChanged, undefined);
       });
 
       const prompt = Effect.fn("Session.prompt")(function* (input: Rpc.Payload<typeof Prompt>) {
+        // Before the lookup: a message with nothing in it must not restore a
+        // session to be refused by it.
+        const options = yield* messageOptions(input);
         const found = yield* lookup(input.sessionId);
-        yield* runPi(() => found.harness.prompt(input.text));
+        // The user's message frees a stale delegation lock explicitly (spec
+        // section 9); an in-flight delegation keeps the harness busy, so
+        // this prompt would be refused before touching a healthy lock.
+        releaseStaleLock(found.delegation, yield* SubscriptionRef.get(found.phase));
+        // Title persistence and prompt start are one short transaction. Two
+        // concurrent first sends cannot append competing names, and deletion
+        // cannot land between the title and the message that justified it.
+        const started = yield* runAdmitted(
+          found.lifecycle,
+          () => new NotFoundError({ sessionId: input.sessionId }),
+          () =>
+            Effect.uninterruptible(
+              Effect.gen(function* () {
+                const generation = yield* inventory.preparePrompt({
+                  sessionId: input.sessionId,
+                  live: found,
+                  text: input.text,
+                  images: input.images ?? [],
+                });
+                const running = trackPiRun(found.lifecycle, () =>
+                  found.harness.prompt(input.text, options),
+                );
+                return { running, generation };
+              }),
+            ),
+        );
+        yield* inventory.scheduleTitle(input.sessionId, found, started.generation);
+        yield* runPi(() => started.running);
         // Pi's prompt promise resolves at the settlement point, so this is
         // "after the turn": one checkpoint per settled turn, no event-side
         // bookkeeping. Steers and follow-ups fold into the same run and are
@@ -516,29 +441,89 @@ export const layer = (options: LayerOptions) =>
         yield* settleSnapshot(input.sessionId, found);
       });
 
+      const editMessage = Effect.fn("Session.editMessage")(function* (
+        input: Rpc.Payload<typeof EditMessage>,
+      ) {
+        const options = yield* messageOptions(input);
+        const selectedModel =
+          input.model === undefined ? undefined : yield* models.resolveAvailable(input.model);
+        const found = yield* lookup(input.sessionId);
+        yield* replaceMessage({
+          sessionId: input.sessionId,
+          entryId: input.entryId,
+          text: input.text,
+          options,
+          ...(selectedModel === undefined ? {} : { model: selectedModel }),
+          ...(input.thinkingLevel === undefined ? {} : { thinkingLevel: input.thinkingLevel }),
+          live: found,
+          runtimeOf: (entries) =>
+            runtimeForBranch({ live: found, entries, workspaces, models, resources }),
+        });
+        yield* settleSnapshot(input.sessionId, found).pipe(
+          Effect.mapError((error) => EditMessageCommittedError.from("settlement", error)),
+        );
+      });
+
       const abort = Effect.fn("Session.abort")(function* (input: Rpc.Payload<typeof Abort>) {
         const found = yield* lookup(input.sessionId);
-        const cleared = yield* runPi(() => found.harness.abort());
+        const cleared = yield* runLivePi(input.sessionId, found, () => found.harness.abort());
         // An aborted run still wrote whatever it wrote before the abort.
         yield* settleSnapshot(input.sessionId, found);
         // The cleared queue goes back to the caller: stopping never destroys
         // text the user typed (spec/conversation.md section 7).
         return {
-          clearedSteer: toWire(cleared.clearedSteer),
-          clearedFollowUp: toWire(cleared.clearedFollowUp),
+          clearedSteer: toWireMessages(jsonValue(cleared.clearedSteer)),
+          clearedFollowUp: toWireMessages(jsonValue(cleared.clearedFollowUp)),
         } satisfies AbortOutput;
       });
 
       const steer = Effect.fn("Session.steer")(function* (input: Rpc.Payload<typeof Steer>) {
+        const options = yield* messageOptions(input);
         const found = yield* lookup(input.sessionId);
-        yield* runPi(() => found.harness.steer(input.text));
+        yield* runLivePi(input.sessionId, found, () => found.harness.steer(input.text, options));
       });
 
       const followUp = Effect.fn("Session.followUp")(function* (
         input: Rpc.Payload<typeof FollowUp>,
       ) {
+        const options = yield* messageOptions(input);
         const found = yield* lookup(input.sessionId);
-        yield* runPi(() => found.harness.followUp(input.text));
+        yield* runLivePi(input.sessionId, found, () => found.harness.followUp(input.text, options));
+      });
+
+      const setThinkingLevel = Effect.fn("Session.setThinkingLevel")(function* (
+        input: Rpc.Payload<typeof SetThinkingLevel>,
+      ) {
+        const found = yield* lookup(input.sessionId);
+        // Pi owns the semantics: idle appends the thinking_level_change entry
+        // now; running buffers it until the turn settles. No busy refusal —
+        // changing effort mid-run is a supported Pi operation.
+        yield* runLivePi(input.sessionId, found, () =>
+          found.harness.setThinkingLevel(input.thinkingLevel),
+        );
+      });
+
+      const setModel = Effect.fn("Session.setModel")(function* (
+        input: Rpc.Payload<typeof SetModel>,
+      ) {
+        const found = yield* lookup(input.sessionId);
+        // Resolve before touching the harness: an unknown reference fails
+        // typed and leaves the session on the model it already had. Pi's
+        // change semantics then mirror setThinkingLevel — immediate record
+        // when idle, buffered until settlement when running.
+        const model = yield* models.resolveAvailable(input.model);
+        // Choosing a single model exits fusion, and the transcript says so
+        // before the model moves: the exit marker is what restore and the
+        // delegation gate read. The harness keeps its orchestrator shape
+        // until the next open; the gate refuses sidekick delegation either
+        // way, so the exit is behaviorally immediate.
+        const entries = yield* runLivePi(input.sessionId, found, () => found.session.getBranch());
+        if (fusionOf(entries) !== null) {
+          yield* runLivePi(input.sessionId, found, () =>
+            found.session.appendCustomEntry("honk.fusion", { stop: null }),
+          );
+        }
+        yield* runLivePi(input.sessionId, found, () => found.harness.setModel(model));
       });
 
       const runGitAction = Effect.fn("Session.runGitAction")(function* (
@@ -549,7 +534,7 @@ export const layer = (options: LayerOptions) =>
         // running turn's user message until settlement, so a marker appended
         // mid-run would land *before* that turn's user message and pair with
         // the wrong turn. Same class, code, and copy as Pi's own refusal.
-        if (found.run.status === "running") {
+        if ((yield* SubscriptionRef.get(found.phase)) !== "idle") {
           return yield* Effect.fail(new AgentHarnessError("busy", "AgentHarness is busy"));
         }
         // Marker before prompt: if the model request fails, the transcript
@@ -557,69 +542,73 @@ export const layer = (options: LayerOptions) =>
         // a surface renders (spec/conversation.md §8). The instructions ride
         // the prompt's own user message, so model context and stored
         // transcript stay identical by construction.
-        yield* runPi(() =>
+        yield* runLivePi(input.sessionId, found, () =>
           found.session.appendCustomEntry("honk.git_action", {
             action: input.action,
             ...(input.files === undefined ? {} : { files: input.files }),
           }),
         );
-        yield* runPi(() => found.harness.prompt(instructionsFor(input.action, input.files)));
+        yield* runLivePi(input.sessionId, found, () =>
+          found.harness.prompt(instructionsFor(input.action, input.files)),
+        );
         yield* settleSnapshot(input.sessionId, found);
       });
 
-      const reload = Effect.fn("Session.reload")(function* (input: {
-        readonly sessionId: SessionId;
-      }) {
+      // Both invocation verbs are `prompt` with the text left to Pi: it holds
+      // the skill and the template, and it owns the invocation format
+      // (`formatSkillInvocation`, `formatPromptTemplateInvocation`). Neither
+      // appends a marker entry the way runGitAction does — the turn's own user
+      // message is already the record of what ran, because Pi writes the
+      // formatted invocation into the transcript as that message. Both settle
+      // at Pi's settlement point and capture the turn's checkpoint there, so a
+      // skill that edits files gets the same receipt a typed prompt would.
+      const runSkill = Effect.fn("Session.runSkill")(function* (
+        input: Rpc.Payload<typeof RunSkill>,
+      ) {
+        const found = yield* lookup(input.sessionId);
+        yield* runLivePi(input.sessionId, found, () =>
+          input.instructions === undefined || input.instructions.length === 0
+            ? found.harness.skill(input.name)
+            : found.harness.skill(input.name, input.instructions),
+        );
+        yield* settleSnapshot(input.sessionId, found);
+      });
+
+      const runCommand = Effect.fn("Session.runCommand")(function* (
+        input: Rpc.Payload<typeof RunCommand>,
+      ) {
+        const found = yield* lookup(input.sessionId);
+        // Pi's own splitter, not a Honk one: `parseCommandArgs` is the rule
+        // `substituteArgs` was written against, so `$1` means the same thing
+        // here as it does inside the template.
+        const args = parseCommandArgs(input.args ?? "");
+        yield* runLivePi(input.sessionId, found, () =>
+          found.harness.promptFromTemplate(input.name, args),
+        );
+        yield* settleSnapshot(input.sessionId, found);
+      });
+
+      const reload = Effect.fn("Session.reload")(function* (input: Rpc.Payload<typeof Reload>) {
         const found = yield* lookup(input.sessionId);
         // Authoritative committed read straight from the Pi session. It never
         // touches the harness, which is what makes it safe during a run and
-        // proves invariant 3: reloading cannot execute work.
-        const entries = yield* runPi(() => found.session.getEntries());
-        return { entries, status: found.run.status };
+        // proves invariant 3: reloading cannot execute work. Pi's own cursor
+        // keeps repair reads proportional to newly committed entries.
+        const state = yield* runLivePi(input.sessionId, found, async () => {
+          if (input.afterEntrySeq !== undefined) {
+            const entries = await found.session.getEntries({ afterEntrySeq: input.afterEntrySeq });
+            return { entries, entrySeq: input.afterEntrySeq + entries.length };
+          }
+          return readStableBranch(found.session);
+        });
+        return { ...state, phase: yield* SubscriptionRef.get(found.phase) };
       });
 
-      /**
-       * Diffs consecutive checkpoints, gated by each turn's own tool calls.
-       *
-       * The snapshot diff is the truth about content; the turn's tool calls
-       * are the truth about attribution. Intersecting them is what keeps a
-       * sibling session's edits out of this turn's receipt without hiding
-       * what a shell command wrote. A pair whose diff cannot be computed —
-       * pruned refs, a repository that went away — contributes nothing rather
-       * than failing the read.
-       */
       const changes = Effect.fn("Session.changes")(function* (input: {
         readonly sessionId: SessionId;
       }) {
         const found = yield* lookup(input.sessionId);
-        const entries = yield* runPi(() => found.session.getEntries());
-        const order = new Map(entries.map((entry, index) => [entry.id, index] as const));
-
-        const turns: TurnChanges[] = [];
-        for (let index = 1; index < found.snapshots.length; index += 1) {
-          const from = found.snapshots[index - 1];
-          const to = found.snapshots[index];
-          if (from === undefined || to === undefined) continue;
-          // A /cd boundary: the two snapshots live in different repositories,
-          // so there is no comparable base and the pair is honestly skipped.
-          if (from.workspaceId !== to.workspaceId) continue;
-
-          const files = yield* git
-            .checkpointChanges({
-              workspaceId: to.workspaceId,
-              from: `${input.sessionId}/${from.entryId}`,
-              to: `${input.sessionId}/${to.entryId}`,
-            })
-            .pipe(Effect.orElseSucceed((): readonly Git.FileChange[] => []));
-          if (files.length === 0) continue;
-
-          const gated = gateTurnFiles(
-            files,
-            turnToolWrites(entries, order.get(from.entryId), order.get(to.entryId)),
-          );
-          if (gated.length > 0) turns.push({ entryId: to.entryId, files: gated });
-        }
-        return { turns } satisfies ChangesOutput;
+        return yield* checkpoints.changes(input.sessionId, found);
       });
 
       const setWorkspace = Effect.fn("Session.setWorkspace")(function* (
@@ -629,43 +618,30 @@ export const layer = (options: LayerOptions) =>
         if (found.binding.workspace.id === input.workspaceId) return;
         const workspace = yield* workspaces.find({ workspaceId: input.workspaceId });
         const env = yield* workspaces.env({ workspaceId: workspace.id });
-        found.binding.workspace = workspace;
-        found.binding.env = env;
-
-        // The move lands in the Pi transcript as a custom entry — out of
-        // model context, like Pi's own model-change entries — and that
-        // entry's id names the new workspace's baseline checkpoint, so the
-        // next turn diffs against the directory as the session found it.
-        const entryId = yield* runPi(() =>
-          found.session.appendCustomEntry("honk.workspace_change", {
-            workspaceId: workspace.id,
-            directory: workspace.directory,
-          }),
+        const binding = { workspace, env };
+        const loaded = yield* loadResources(resources, binding);
+        yield* runAdmitted(
+          found.lifecycle,
+          () => new NotFoundError(input),
+          () =>
+            Effect.gen(function* () {
+              found.binding.workspace = binding.workspace;
+              found.binding.env = binding.env;
+              yield* runPi(() => found.harness.setResources(loaded));
+              const entryId = yield* runPi(() =>
+                found.session.appendCustomEntry("honk.workspace_change", {
+                  workspaceId: workspace.id,
+                  directory: workspace.directory,
+                }),
+              );
+              yield* captureSnapshot(input.sessionId, found, entryId);
+            }),
         );
-        yield* captureSnapshot(input.sessionId, found, entryId);
       });
 
       const revert = Effect.fn("Session.revert")(function* (input: Rpc.Payload<typeof Revert>) {
         const found = yield* lookup(input.sessionId);
-        const target = found.snapshots.find((snapshot) => snapshot.entryId === input.entryId);
-        if (target === undefined) {
-          return yield* new Git.CheckpointNotFoundError({
-            checkpoint: `${input.sessionId}/${input.entryId}`,
-          });
-        }
-        // The revert lands in the transcript as a custom entry, and that
-        // entry's id names the safety checkpoint of the present. A fresh id
-        // by construction: naming the safety by an existing entry would
-        // overwrite the very checkpoint being restored. Undo is a revert to
-        // this entry.
-        const entryId = yield* runPi(() =>
-          found.session.appendCustomEntry("honk.revert", { toEntryId: input.entryId }),
-        );
-        yield* captureSnapshot(input.sessionId, found, entryId);
-        yield* git.restoreCheckpoint({
-          workspaceId: target.workspaceId,
-          checkpoint: `${input.sessionId}/${target.entryId}`,
-        });
+        yield* checkpoints.revert(input, found);
       });
 
       const events = Effect.fn("Session.events")(function* (input: {
@@ -675,24 +651,39 @@ export const layer = (options: LayerOptions) =>
         // Subscribing before returning is the guarantee: once this effect
         // completes, every subsequent event reaches the caller's stream.
         const subscription = yield* PubSub.subscribe(found.events);
-        return Stream.fromSubscription(subscription);
+        const stream = Stream.fromSubscription(subscription);
+        // The run's current queue, replayed ahead of the live events because
+        // Pi announces the queue only when it changes. Read after
+        // subscribing, so a frame published in between is repeated rather
+        // than lost — every queue_update carries the whole queue, and a
+        // client that renders the same queue twice renders it once.
+        const queued = found.queue.last;
+        return queued === undefined ? stream : Stream.concat(Stream.make(queued), stream);
       });
+
+      const watchInventory = inventory.watch;
 
       return Service.of({
         create,
         prompt,
+        editMessage,
         abort,
         steer,
         followUp,
         runGitAction,
+        runSkill,
+        runCommand,
         reload,
         changes,
         setWorkspace,
+        setThinkingLevel,
+        setModel,
         revert,
         list,
         get,
         delete: remove,
         events,
+        watchInventory,
       });
     }),
   );
@@ -709,12 +700,13 @@ export class Service extends Context.Service<Service, Interface>()("honk/Session
  * represent, so the serializer rejects them. This round-trips each value
  * through JSON exactly once — the same normalization Pi's own JSONL persistence
  * applies — and changes nothing else.
- *
- * TODO(core-migration §6): hand-rolled normalization inside handlers, applied
- * per entry on every reload. Adopting Pi's protocol schemas moves this into the
- * codec at the boundary, where a value is parsed once and trusted after.
  */
-const toWire = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
+const jsonValue = (value: unknown): unknown => JSON.parse(JSON.stringify(value));
+const toWireEntry = (value: unknown) => Schema.decodeUnknownSync(PiEntry)(jsonValue(value));
+const toWireEvent = (value: unknown) => Schema.decodeUnknownSync(PiEvent)(jsonValue(value));
+const toWireMessages = Schema.decodeUnknownSync(Schema.Array(PiMessage));
+const liveFrame: EventsFrame = { type: "live" };
+const eventFrame = (event: unknown): EventsFrame => ({ type: "event", event: toWireEvent(event) });
 
 /**
  * Binds the session RPCs to {@link Service}.
@@ -732,12 +724,17 @@ export const rpcLayer = Rpcs.toLayer(
     return {
       "session.create": (payload) => session.create(payload),
       "session.prompt": (payload) => session.prompt(payload),
+      "session.edit_message": (payload) => session.editMessage(payload),
       "session.abort": (payload) => session.abort(payload),
       "session.steer": (payload) => session.steer(payload),
       "session.follow_up": (payload) => session.followUp(payload),
       "session.run_git_action": (payload) => session.runGitAction(payload),
+      "session.run_skill": (payload) => session.runSkill(payload),
+      "session.run_command": (payload) => session.runCommand(payload),
       "session.changes": (payload) => session.changes(payload),
       "session.set_workspace": (payload) => session.setWorkspace(payload),
+      "session.set_thinking_level": (payload) => session.setThinkingLevel(payload),
+      "session.set_model": (payload) => session.setModel(payload),
       "session.revert": (payload) => session.revert(payload),
       "session.list": (payload) => session.list(payload),
       "session.get": (payload) => session.get(payload),
@@ -745,7 +742,7 @@ export const rpcLayer = Rpcs.toLayer(
       "session.reload": (payload) =>
         session
           .reload(payload)
-          .pipe(Effect.map((state) => ({ ...state, entries: state.entries.map(toWire) }))),
+          .pipe(Effect.map((state) => ({ ...state, entries: state.entries.map(toWireEntry) }))),
       // Stream.unwrap folds the subscription Scope into the stream lifetime:
       // when the rpc call ends, the stream closes and the client detaches
       // without touching the run. The `live` head frame is prepended here
@@ -757,15 +754,13 @@ export const rpcLayer = Rpcs.toLayer(
             .events(payload)
             .pipe(
               Effect.map((stream) =>
-                Stream.concat(
-                  Stream.make({ type: "live" } as const),
-                  stream.pipe(
-                    Stream.map((event) => ({ type: "event", event: toWire(event) }) as const),
-                  ),
-                ),
+                Stream.concat(Stream.make(liveFrame), stream.pipe(Stream.map(eventFrame))),
               ),
             ),
         ),
+      // No `live` head frame here: the stream's own first element is the
+      // current inventory, which carries the same guarantee as data.
+      "session.watch_inventory": () => Stream.unwrap(session.watchInventory),
     };
   }),
 );

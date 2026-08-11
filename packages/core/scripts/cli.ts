@@ -6,17 +6,17 @@
  * change can be re-verified against a live host instead of trusted from a
  * test run. Two modes, resolved automatically:
  *
- * - **Connect**: when the data directory holds a `host.json` (written by a
- *   running host) or `--url` is passed, commands travel the real remote path —
- *   Effect RPC over HTTP with ndjson framing, the exact wiring the desktop
- *   renderer uses.
+ * - **Connect**: when the data directory holds a `host.json` written by a
+ *   running host, commands travel the real authenticated remote path — Effect
+ *   RPC over HTTP with ndjson framing, the exact wiring the desktop renderer
+ *   uses.
  * - **Standalone**: otherwise a core is opened in-process over the data
  *   directory (taking the writer lease, exactly like an app launch) with the
  *   real provider catalog over the data directory's stored credentials — so
  *   `login` then `prompt` reaches a real model from this terminal.
  *
  * Usage:
- *   bun scripts/cli.ts [--data <dir>] [--url <baseUrl>] <command> [args]
+ *   bun scripts/cli.ts [--data <dir>] <command> [args]
  *
  * Commands:
  *   sessions                                   list stored sessions
@@ -24,7 +24,7 @@
  *   create <workspaceId> [providerId modelId]  create a session
  *   prompt <sessionId> <text...>               send a prompt, print the reply
  *   changes <sessionId>                        per-turn change receipts
- *   reload <sessionId>                         transcript summary + run status
+ *   reload <sessionId>                         transcript summary + run phase
  *   delete <sessionId>                         delete a session and its checkpoints
  *   revert <sessionId> <entryId>               restore a turn's checkpoint
  *   open <directory>                           workspace trust state
@@ -38,13 +38,25 @@
  */
 
 import { readFile } from "node:fs/promises";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline/promises";
 
-import { createHonkClient, createHonkCore, Models } from "../src/honk-core";
+import { Option, Schema } from "effect";
+
+import { createHonkClient, HonkConnectionSchema, type HonkConnection } from "../src/client";
+import { createHonkCore } from "../src/honk-core";
+import { Models } from "../src/models";
 import { createNodeExecutionEnv } from "../src/node";
 
-const defaultDataDirectory = "/tmp/honk-core-desktop";
+const defaultDataDirectory = join(homedir(), ".honk", "core");
+
+const ReloadSummary = Schema.Struct({
+  phase: Schema.String,
+  entries: Schema.Array(Schema.Struct({ type: Schema.optionalKey(Schema.String) })),
+});
+const decodeReloadSummary = Schema.decodeUnknownOption(ReloadSummary);
+const decodeHonkConnection = Schema.decodeUnknownOption(HonkConnectionSchema);
 
 type Call = (tag: string, payload: unknown) => Promise<unknown>;
 
@@ -119,11 +131,12 @@ const commands: Record<string, Command> = {
     usage: "reload <sessionId>",
     payload: ([sessionId]) => (sessionId ? { sessionId } : undefined),
     render: (result) => {
-      const state = result as { status: string; entries: readonly { type?: string }[] };
+      const state = decodeReloadSummary(result);
+      if (Option.isNone(state)) return result;
       return {
-        status: state.status,
-        entryCount: state.entries.length,
-        entryTypes: state.entries.map((entry) => entry.type),
+        phase: state.value.phase,
+        entryCount: state.value.entries.length,
+        entryTypes: state.value.entries.map((entry) => entry.type),
       };
     },
   },
@@ -135,8 +148,7 @@ const commands: Record<string, Command> = {
   revert: {
     tag: "session.revert",
     usage: "revert <sessionId> <entryId>",
-    payload: ([sessionId, entryId]) =>
-      sessionId && entryId ? { sessionId, entryId } : undefined,
+    payload: ([sessionId, entryId]) => (sessionId && entryId ? { sessionId, entryId } : undefined),
   },
   open: {
     tag: "workspace.open",
@@ -203,7 +215,7 @@ const commands: Record<string, Command> = {
 };
 
 const usage = () => {
-  console.error("Usage: bun scripts/cli.ts [--data <dir>] [--url <baseUrl>] <command> [args]\n");
+  console.error("Usage: bun scripts/cli.ts [--data <dir>] <command> [args]\n");
   for (const command of Object.values(commands)) console.error(`  ${command.usage}`);
   process.exit(1);
 };
@@ -267,15 +279,19 @@ const interactiveLogin = async (dataDirectory: string, providerId: string): Prom
 
 /** Both modes speak the public client object, addressed by command tags. */
 const sdkCall =
-  (sdk: Record<string, unknown>): Call =>
+  (sdk: object): Call =>
   async (tag, payload) => {
     const dot = tag.indexOf(".");
     const namespace = tag.slice(0, dot);
-    const method = tag.slice(dot + 1).replace(/_(\w)/g, (_, letter: string) => letter.toUpperCase());
-    const group = sdk[namespace] as Record<string, (input: unknown) => Promise<unknown>> | undefined;
-    const call = group?.[method];
-    if (call === undefined) throw new Error(`Unknown command tag: ${tag}`);
-    return call(payload);
+    const method = tag
+      .slice(dot + 1)
+      .replace(/_(\w)/g, (_, letter: string) => letter.toUpperCase());
+    const group: unknown = Reflect.get(sdk, namespace);
+    if (!(group instanceof Object)) throw new Error(`Unknown command tag: ${tag}`);
+    const call: unknown = Reflect.get(group, method);
+    if (!(call instanceof Function)) throw new Error(`Unknown command tag: ${tag}`);
+    const result: unknown = await Reflect.apply(call, group, [payload]);
+    return result;
   };
 
 const main = async () => {
@@ -288,7 +304,6 @@ const main = async () => {
     return value;
   };
 
-  const url = takeFlag("--url");
   const dataDirectory = takeFlag("--data") ?? defaultDataDirectory;
   const [name, ...rest] = args;
 
@@ -303,34 +318,37 @@ const main = async () => {
   const payload = command.payload(rest);
   if (payload === undefined) return usage();
 
-  // Mode resolution: an explicit --url wins, a running host's discovery file
-  // is next, and only an unowned data directory boots a standalone core.
-  let discovered = url;
-  if (!discovered) {
-    discovered = await readFile(join(dataDirectory, "host.json"), "utf8").then(
-      (content) => (JSON.parse(content) as { baseUrl?: string }).baseUrl,
-      () => undefined,
-    );
-    // A host killed uncleanly leaves its host.json behind. Any HTTP response
-    // proves liveness; only a connection failure means the file is stale.
-    if (discovered) {
-      const alive = await fetch(discovered, { method: "HEAD" }).then(
-        () => true,
-        () => false,
-      );
-      if (!alive) {
-        console.error(`stale host.json ignored (${discovered} unreachable)`);
-        discovered = undefined;
+  // A running host's private discovery file is the only remote bootstrap.
+  // Otherwise an unowned data directory boots a standalone Core.
+  let discovered = await readFile(join(dataDirectory, "host.json"), "utf8").then(
+    (content): HonkConnection | undefined => {
+      try {
+        return Option.getOrUndefined(decodeHonkConnection(JSON.parse(content)));
+      } catch {
+        return undefined;
       }
+    },
+    () => undefined,
+  );
+  // A host killed uncleanly leaves its host.json behind. Any HTTP response
+  // proves liveness; only a connection failure means the file is stale.
+  if (discovered) {
+    const alive = await fetch(discovered.url, { method: "HEAD" }).then(
+      () => true,
+      () => false,
+    );
+    if (!alive) {
+      console.error(`stale host.json ignored (${discovered.url} unreachable)`);
+      discovered = undefined;
     }
   }
 
   let close = async () => {};
   let call: Call;
   if (discovered) {
-    console.error(`connected: ${discovered}`);
-    const sdk = await createHonkClient({ url: discovered });
-    call = sdkCall(sdk as unknown as Record<string, unknown>);
+    console.error(`connected: ${discovered.url}`);
+    const sdk = await createHonkClient(discovered);
+    call = sdkCall(sdk);
     close = () => sdk.close();
   } else {
     console.error(`standalone: ${dataDirectory}`);
@@ -338,12 +356,14 @@ const main = async () => {
       dataDirectory,
       createExecutionEnv: createNodeExecutionEnv,
     });
-    call = sdkCall(core.client() as unknown as Record<string, unknown>);
+    call = sdkCall(core.client());
     close = () => core.close();
   }
 
   try {
-    const result = command.run ? await command.run(call, payload) : await call(command.tag, payload);
+    const result = command.run
+      ? await command.run(call, payload)
+      : await call(command.tag, payload);
     const rendered = command.render ? command.render(result) : result;
     if (rendered === undefined) console.log("ok");
     else if (typeof rendered === "string") console.log(rendered);

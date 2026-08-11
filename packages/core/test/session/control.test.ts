@@ -1,8 +1,13 @@
 // Workspace binding and run control: create's trust gate, abort, followUp,
 // and steer. The prompt/reload basics live in lifecycle.test.ts.
 
+import { execFileSync } from "node:child_process";
+import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
 import { AgentHarnessError } from "@earendil-works/pi-agent-core";
-import { fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
+import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
 import { describe, expect, it } from "@effect/vitest";
 import { Deferred, Effect, Fiber, Stream } from "effect";
 
@@ -86,24 +91,75 @@ describe("workspace-bound sessions and run control", () => {
         // stopping never destroys something the user typed (conversation §7).
         yield* session.followUp({ sessionId: id, text: "and after that, lint" });
         const cleared = yield* session.abort({ sessionId: id });
-        const restored = cleared.clearedFollowUp
-          .map((message) => (message as { readonly content?: unknown }).content)
-          .map((content) =>
-            typeof content === "string"
-              ? content
-              : Array.isArray(content)
-                ? content
-                    .map((part) => (part as { readonly text?: string }).text ?? "")
-                    .join("")
-                : "",
-          );
+        const restored = cleared.clearedFollowUp.flatMap((message) => {
+          if (!("role" in message) || message.role !== "user") return [];
+          if (!(message.content instanceof Array)) return [message.content];
+          return [
+            message.content.flatMap((part) => (part.type === "text" ? [part.text] : [])).join(""),
+          ];
+        });
         expect(restored).toEqual(["and after that, lint"]);
 
         yield* Fiber.join(run);
         yield* Deferred.await(sawSettled);
 
         const after = yield* session.reload({ sessionId: id });
-        expect(after.status).toBe("idle");
+        expect(after.phase).toBe("idle");
+      });
+
+      yield* program.pipe(Effect.scoped, Effect.provide(appLayer));
+    }),
+  );
+
+  it.effect("prompt and abort settling the same turn never overwrite the base checkpoint", () =>
+    Effect.gen(function* () {
+      const directory = yield* Effect.promise(() => mkdtemp(join(tmpdir(), "honk-abort-base-")));
+      execFileSync("git", ["init", "."], { cwd: directory });
+      const file = join(directory, "state.txt");
+      yield* Effect.promise(() => writeFile(file, "base\n"));
+
+      const { faux, appLayer } = makeFauxSessionLayer();
+      const { response } = gatedResponse("never delivered");
+      faux.setResponses([
+        response,
+        fauxAssistantMessage([
+          fauxToolCall("write", { path: "state.txt", content: "second turn\n" }),
+        ]),
+        fauxAssistantMessage("done"),
+      ]);
+
+      const program = Effect.gen(function* () {
+        const session = yield* Session.Service;
+        const workspace = yield* openTrustedWorkspace(directory);
+        const { id } = yield* session.create({ workspaceId: workspace.id });
+        yield* Effect.promise(() => writeFile(file, "during turn\n"));
+
+        const sawStart = yield* Deferred.make<void>();
+        const stream = yield* session.events({ sessionId: id });
+        yield* stream.pipe(
+          Stream.runForEach((event) =>
+            event.type === "agent_start" ? Deferred.succeed(sawStart, undefined) : Effect.void,
+          ),
+          Effect.forkScoped,
+        );
+
+        const run = yield* session.prompt({ sessionId: id, text: "Wait" }).pipe(Effect.forkScoped);
+        yield* Deferred.await(sawStart);
+        yield* session.abort({ sessionId: id });
+        yield* Fiber.join(run);
+
+        yield* session.revert({ sessionId: id, entryId: "base" });
+        expect(yield* Effect.promise(() => readFile(file, "utf8"))).toBe("base\n");
+
+        // Duplicate settlement did not skip the cursor forward: the next
+        // turn gets its own immutable checkpoint.
+        yield* session.prompt({ sessionId: id, text: "Write the next state" });
+        const after = yield* session.reload({ sessionId: id });
+        const nextTurn = after.entries.at(-1)?.id;
+        if (nextTurn === undefined) return yield* Effect.die(new Error("missing next turn"));
+        yield* Effect.promise(() => writeFile(file, "after checkpoint\n"));
+        yield* session.revert({ sessionId: id, entryId: nextTurn });
+        expect(yield* Effect.promise(() => readFile(file, "utf8"))).toBe("second turn\n");
       });
 
       yield* program.pipe(Effect.scoped, Effect.provide(appLayer));
@@ -151,7 +207,7 @@ describe("workspace-bound sessions and run control", () => {
           "assistant",
         ]);
         expect(textOf(messages[3])).toBe("Second answer");
-        expect(after.status).toBe("idle");
+        expect(after.phase).toBe("idle");
       });
 
       yield* program.pipe(Effect.scoped, Effect.provide(appLayer));
@@ -168,7 +224,11 @@ describe("workspace-bound sessions and run control", () => {
         const workspace = yield* openTrustedWorkspace("/tmp/honk-session-tests");
         const { id } = yield* session.create({ workspaceId: workspace.id });
 
-        yield* session.runGitAction({ sessionId: id, action: "commitAndPush", files: ["src/a.ts"] });
+        yield* session.runGitAction({
+          sessionId: id,
+          action: "commitAndPush",
+          files: ["src/a.ts"],
+        });
 
         const after = yield* session.reload({ sessionId: id });
         // The marker precedes the prompt's user message (spec/conversation §8):
@@ -182,11 +242,9 @@ describe("workspace-bound sessions and run control", () => {
         expect(messages.map((entry) => entry.message.role)).toEqual(["user", "assistant"]);
         // The instructions are the turn's real user message — what the model
         // saw is what the transcript stores.
-        expect(textOf(messages[0])).toBe(
-          Session.instructionsFor("commitAndPush", ["src/a.ts"]),
-        );
+        expect(textOf(messages[0])).toBe(Session.instructionsFor("commitAndPush", ["src/a.ts"]));
         expect(textOf(messages[0])).toContain("Push the current branch");
-        expect(after.status).toBe("idle");
+        expect(after.phase).toBe("idle");
       });
 
       yield* program.pipe(Effect.provide(appLayer));
@@ -212,14 +270,14 @@ describe("workspace-bound sessions and run control", () => {
           ),
           Effect.forkScoped,
         );
-        const run = yield* session.prompt({ sessionId: id, text: "Keep going" }).pipe(
-          Effect.forkScoped,
-        );
+        const run = yield* session
+          .prompt({ sessionId: id, text: "Keep going" })
+          .pipe(Effect.forkScoped);
         yield* Deferred.await(sawStart);
 
-        const error = yield* session.runGitAction({ sessionId: id, action: "commit" }).pipe(
-          Effect.flip,
-        );
+        const error = yield* session
+          .runGitAction({ sessionId: id, action: "commit" })
+          .pipe(Effect.flip);
         expect(error).toBeInstanceOf(AgentHarnessError);
         expect((error as AgentHarnessError).code).toBe("busy");
 
@@ -275,7 +333,7 @@ describe("workspace-bound sessions and run control", () => {
         const after = yield* session.reload({ sessionId: id });
         const texts = messageEntries(after.entries).map((entry) => textOf(entry));
         expect(texts).toContain("Actually, do this instead");
-        expect(after.status).toBe("idle");
+        expect(after.phase).toBe("idle");
         // The second faux response stays queued for the next turn.
         expect(faux.getPendingResponseCount()).toBe(1);
       });

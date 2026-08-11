@@ -9,14 +9,18 @@ import { join } from "node:path";
 
 import type { MessageEntry, SessionTreeEntry } from "@earendil-works/pi-agent-core";
 import { createModels } from "@earendil-works/pi-ai";
-import type { FauxResponseStep } from "@earendil-works/pi-ai/providers/faux";
+import type { FauxModelDefinition, FauxResponseStep } from "@earendil-works/pi-ai/providers/faux";
 import { fauxAssistantMessage, fauxProvider } from "@earendil-works/pi-ai/providers/faux";
 import { Effect, Layer } from "effect";
 
+import { Commands } from "./commands";
 import { Git } from "./git";
+import { Mcp } from "./mcp";
 import { Models } from "./models";
 import { createNodeExecutionEnv } from "./node";
+import { Resources } from "./resources";
 import { Session } from "./session";
+import { Skills } from "./skills";
 import { Workspace } from "./workspace";
 
 // Tests run in Node, so they use Pi's real Node environment rather than a
@@ -29,11 +33,56 @@ export const createExecutionEnv = createNodeExecutionEnv;
 export const createTestStorage = () =>
   createExecutionEnv(mkdtempSync(join(tmpdir(), "honk-data-")));
 
-export const makeFauxSessionLayer = () => {
-  const faux = fauxProvider();
+/** Offline title generator for host tests whose faux queue is reserved for conversation turns. */
+export const generatePromptSessionTitle = Session.generatePromptSessionTitle;
+
+export const makeFauxSessionLayer = (
+  options: {
+    readonly presets?: "faux";
+    readonly models?: readonly FauxModelDefinition[];
+    readonly generateTitle?: Session.GenerateSessionTitle;
+  } = {},
+) => {
+  const faux = fauxProvider(options.models === undefined ? {} : { models: [...options.models] });
   const collection = createModels();
   collection.setProvider(faux.provider);
   const storage = createTestStorage();
+  // Delegation tests need presets whose arms the faux catalog resolves; the
+  // shipped catalog's arms do not, so by default sessions get no task tool
+  // and every existing fixture behaves exactly as before.
+  const fauxModel = faux.getModel();
+  const fauxArm: Session.Arm = {
+    model: { providerId: fauxModel.provider, modelId: fauxModel.id },
+    thinkingLevel: "low",
+  };
+  // Two faux stops sharing one orchestrator arm, so restore tests can prove
+  // the marker is authoritative where the arms cannot be.
+  const pairings: readonly Session.Pairing[] | undefined =
+    options.presets === "faux"
+      ? [
+          { stop: "low", main: fauxArm, sidekick: { ...fauxArm, thinkingLevel: "medium" } },
+          { stop: "medium", main: fauxArm, sidekick: { ...fauxArm, thinkingLevel: "high" } },
+        ]
+      : undefined;
+  const presets: readonly Session.Preset[] | undefined =
+    options.presets === "faux"
+      ? [
+          {
+            name: "review",
+            label: "Review",
+            description: "Reviews code without editing.",
+            arm: fauxArm,
+            prompt: "Review only. Do not edit files.",
+          },
+          {
+            name: "oracle",
+            label: "Oracle",
+            description: "Reasons about code without editing.",
+            arm: fauxArm,
+            prompt: "Reason only. Do not edit files.",
+          },
+        ]
+      : undefined;
   // The faux provider's auth always resolves, so it is "configured" with an
   // empty credential store — default model resolution lands on it with no
   // setup, exactly as a credentialed provider would in production.
@@ -41,19 +90,40 @@ export const makeFauxSessionLayer = () => {
   const modelsLayer = Models.layer({ collection, credentials });
   // Session snapshots settled turns through Git.Service, so the session
   // layer needs it even in tests that never read a diff.
-  const sessionLayer = Session.layer({ storage }).pipe(
+  // An empty directory stands in for ~/.config/mcp so fixtures never read
+  // the developer's real global MCP configuration.
+  const mcpLayer = Mcp.defaultLayer({
+    storage,
+    globalConfigDirectory: mkdtempSync(join(tmpdir(), "honk-mcp-global-")),
+  });
+  const sessionLayer = Session.layer({
+    storage,
+    generateTitle: options.generateTitle ?? Session.generatePromptSessionTitle,
+    ...(presets === undefined ? {} : { presets }),
+    ...(pairings === undefined ? {} : { pairings }),
+  }).pipe(
     Layer.provide(Git.defaultLayer),
     Layer.provide(modelsLayer),
+    Layer.provide(mcpLayer),
+    // A fixture workspace usually has no .agents/skills, so this scans
+    // nothing and arms the harness with two empty lists — which is exactly
+    // what a workspace without skills does in production. One layer value, so
+    // Effect memoizes it into the single scan the skills and commands
+    // services below also read.
+    Layer.provide(Resources.defaultLayer),
   );
   // Self-contained app layer: one workspace instance shared by the session
   // layer and the test program, so ids minted by trust are findable.
-  const appLayer = sessionLayer.pipe(
-    Layer.provideMerge(Workspace.defaultLayer({ createExecutionEnv, storage })),
-  );
+  const appLayer = Layer.mergeAll(
+    sessionLayer,
+    Skills.layer.pipe(Layer.provide(Resources.defaultLayer)),
+    Commands.layer.pipe(Layer.provide(Resources.defaultLayer)),
+  ).pipe(Layer.provideMerge(Workspace.defaultLayer({ createExecutionEnv, storage })));
   // `createModels` is what a host test passes to createHonkCore; the
   // pre-built layers stay for tests that provide services directly.
   return {
     faux,
+    collection,
     model: faux.getModel(),
     createModels: () => collection,
     createExecutionEnv,

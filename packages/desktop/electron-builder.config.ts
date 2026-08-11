@@ -88,13 +88,6 @@ export default {
     "resources/dock-icon.png",
     "resources/app-icons/*.png",
   ],
-  extraResources: [
-    {
-      // opencode-ai installs its selected native binary under this name on every platform.
-      from: "node_modules/opencode-ai/bin",
-      to: "opencode/bin",
-    },
-  ],
   afterPack: "scripts/after-pack.mjs",
   publish: resolvePublishConfig(),
   mac: {

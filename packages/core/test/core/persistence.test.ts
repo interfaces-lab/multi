@@ -16,8 +16,9 @@ import {
 } from "@earendil-works/pi-ai/providers/faux";
 import { describe, expect, it } from "vitest";
 
-import type { HonkClient } from "../../src/honk-core";
-import { createHonkCore, LeaseError, Session } from "../../src/honk-core";
+import type { HonkClient } from "../../src/client";
+import { createHonkCore, LeaseError } from "../../src/honk-core";
+import { Session } from "../../src/session";
 import { createExecutionEnv } from "../../src/testing";
 
 // Each call is "one host process": a fresh faux provider over the same data
@@ -29,6 +30,7 @@ const startCore = async (dataDirectory: string) => {
   const core = await createHonkCore({
     dataDirectory,
     createModels: () => collection,
+    generateSessionTitle: Session.generatePromptSessionTitle,
     createExecutionEnv,
   });
   return { core, faux };

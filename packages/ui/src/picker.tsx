@@ -25,6 +25,9 @@ import {
 } from "./tokens.stylex";
 
 const PICKER_GUTTER = 4;
+// A popup flush against the viewport edge looks cut off, so it holds the panel pad away from every
+// edge. `--available-height` shrinks by the same amount and the list scrolls inside it.
+const PICKER_COLLISION_PADDING = 12;
 // The popup ceiling preserves enough viewport context around an anchored picker.
 const PICKER_POPUP_MAX_HEIGHT = "min(360px, var(--available-height))";
 const POPUP_RING = `inset 0 0 0 1px ${colorVars["--honk-color-border-muted"]}`;
@@ -327,6 +330,7 @@ function PickerPopup({
         side={side}
         align={align}
         sideOffset={PICKER_GUTTER}
+        collisionPadding={PICKER_COLLISION_PADDING}
         alignItemWithTrigger={false}
         {...stylex.props(sx.positioner, layer === "dialog" && sx.positionerDialog)}
       >

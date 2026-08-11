@@ -21,8 +21,6 @@ jobs:
     name: Quality
     runs-on: blacksmith-6vcpu-macos-15
     timeout-minutes: 20
-    env:
-      PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/.playwright-browsers
     defaults:
       run:
         shell: bash
@@ -51,16 +49,6 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-pnpm-${{ hashFiles('pnpm-lock.yaml') }}-
 
-      - name: Cache Playwright browsers
-        id: playwright-cache
-        uses: actions/cache@v5
-        with:
-          path: ${{ github.workspace }}/.playwright-browsers
-          key: ${{ runner.os }}-${{ runner.arch }}-playwright-${{ hashFiles('pnpm-lock.yaml') }}-chromium
-          restore-keys: |
-            ${{ runner.os }}-${{ runner.arch }}-playwright-${{ hashFiles('pnpm-lock.yaml') }}-
-            ${{ runner.os }}-${{ runner.arch }}-playwright-
-
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
@@ -73,17 +61,11 @@ jobs:
       - name: Typecheck
         run: pnpm run typecheck
 
+      - name: App architecture
+        run: pnpm run check:app-architecture
+
       - name: Test
         run: pnpm run test
-
-      - name: Install Playwright browsers
-        if: steps.playwright-cache.outputs.cache-hit != 'true'
-        run: |
-          cd packages/app
-          pnpx playwright install chromium
-
-      - name: Browser test
-        run: pnpm --dir packages/app run test:browser
 
       - name: Build desktop pipeline
         run: pnpm run build:desktop
@@ -92,19 +74,8 @@ jobs:
         run: |
           test -f packages/desktop/out/preload/index.js
           test -f packages/desktop/out/renderer/index.html
-          test -f packages/desktop/out/server/bin.mjs
+          test -f packages/desktop/out/main/index.js
           grep -nE "desktopBridge|getLocalEnvironmentBootstrap|PICK_FOLDER_CHANNEL|wsUrl" packages/desktop/out/preload/index.js
-
-      - name: Upload Playwright artifacts
-        if: failure()
-        uses: actions/upload-artifact@v7
-        with:
-          name: playwright-macos-${{ github.run_attempt }}
-          if-no-files-found: ignore
-          retention-days: 7
-          path: |
-            packages/app/e2e/test-results
-            packages/app/e2e/playwright-report
 
   release_smoke:
     name: Release Smoke

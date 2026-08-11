@@ -51,19 +51,13 @@ describe("chat start machine", () => {
     expect(fold([{ type: "trust_declined" }], trust)).toEqual({ step: "pick", error: null });
   });
 
-  it("creating leaves ready exactly once and failures land on the picker", () => {
-    const ready = fold([
-      { type: "directory_chosen", directory: "/tmp/repo" },
-      { type: "open_result", result: readyResult },
-    ]);
-    const creating = fold([{ type: "create_started" }], ready);
-    expect(creating).toEqual({ step: "creating", directory: "/tmp/repo" });
-
-    // A stale second click cannot re-enter creating.
-    expect(fold([{ type: "create_started" }], creating)).toBe(creating);
-
-    expect(fold([{ type: "request_failed", message: "models.no_model: nothing" }], creating)).toEqual(
-      { step: "pick", error: "models.no_model: nothing" },
+  it("a failure anywhere lands on the picker with the message", () => {
+    const opening = fold([{ type: "directory_chosen", directory: "/tmp/repo" }]);
+    expect(fold([{ type: "request_failed", message: "workspace.gone: nothing" }], opening)).toEqual(
+      {
+        step: "pick",
+        error: "workspace.gone: nothing",
+      },
     );
   });
 
@@ -76,13 +70,7 @@ describe("chat start machine", () => {
     expect(fold([{ type: "open_result", result: trustRequired }], ready)).toBe(ready);
     // Trust events outside the trust step change nothing.
     expect(fold([{ type: "trust_accepted" }], ready)).toBe(ready);
-  });
-
-  it("closing the workspace returns to the picker", () => {
-    const ready = fold([
-      { type: "directory_chosen", directory: "/tmp/repo" },
-      { type: "open_result", result: readyResult },
-    ]);
-    expect(fold([{ type: "workspace_closed" }], ready)).toEqual({ step: "pick", error: null });
+    // A pick mid-flight cannot restart the open under the in-flight create.
+    expect(fold([{ type: "directory_chosen", directory: "/tmp/other" }], ready)).toBe(ready);
   });
 });

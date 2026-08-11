@@ -33,7 +33,6 @@ minimumReleaseAgeExclude:
   - "@effect/tsgo-win32-x64@0.24.3"
   - "@effect/tsgo@0.24.3"
   - "@legendapp/list@3.3.3"
-  - "@khalilgharbaoui/opencode-claude-code-plugin@0.11.0"
   - "@central-icons-react/round-outlined-radius-2-stroke-1.5@1.1.305"
   - "@stylexswc/plugin-shared@0.18.3"
   - "@stylexswc/postcss-plugin@0.18.3"
@@ -64,7 +63,6 @@ allowBuilds:
   protobufjs: false
   electron-winstaller: false
   sharp: true
-  opencode-ai: true
   "@swc/core": false
 
 catalog:

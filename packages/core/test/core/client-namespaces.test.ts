@@ -9,9 +9,10 @@ import { createModels } from "@earendil-works/pi-ai";
 import { fauxProvider } from "@earendil-works/pi-ai/providers/faux";
 import { describe, expect, it } from "vitest";
 
-import type { HonkClient } from "../../src/honk-core";
-import { createHonkCore, Rpcs } from "../../src/honk-core";
-import { createExecutionEnv } from "../../src/testing";
+import type { HonkClient } from "../../src/client";
+import { Rpcs } from "../../src/client";
+import { createHonkCore } from "../../src/honk-core";
+import { createExecutionEnv, generatePromptSessionTitle } from "../../src/testing";
 
 const startCore = async () => {
   const { mkdtemp } = await import("node:fs/promises");
@@ -23,6 +24,7 @@ const startCore = async () => {
   return createHonkCore({
     dataDirectory: await mkdtemp(join(tmpdir(), "honk-client-data-")),
     createModels: () => collection,
+    generateSessionTitle: generatePromptSessionTitle,
     createExecutionEnv,
   });
 };
@@ -89,13 +91,9 @@ describe("the public client namespaces", () => {
     const sdk = core.client();
 
     // "sdk.session, sdk.models, sdk.files, sdk.git, and sdk.mcp always exist."
-    // TODO(core-migration §6): mcp is still missing, so this asserts what is
-    // true today and names what is not. Add it here when it lands rather than
-    // discovering the gap from a client.
     expect(Object.keys(sdk)).toEqual(
-      expect.arrayContaining(["workspace", "session", "files", "git", "models"]),
+      expect.arrayContaining(["workspace", "session", "files", "git", "models", "mcp"]),
     );
-    expect(Object.keys(sdk)).not.toContain("mcp");
 
     await core.close();
   });

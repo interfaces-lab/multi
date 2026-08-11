@@ -35,9 +35,6 @@ export const DesktopConfig = Config.all({
     Config.option,
   ),
   commitHashOverride: trimmedString("HONK_COMMIT_HASH"),
-  cloudflaredExecutableOverride: trimmedString("HONK_CLOUDFLARED_BIN"),
-  desktopLanHostOverride: trimmedString("HONK_DESKTOP_LAN_HOST"),
-  desktopRemotePort: Config.port("HONK_DESKTOP_REMOTE_PORT").pipe(Config.withDefault(3773)),
   otlpTracesUrl: trimmedString("HONK_OTLP_TRACES_URL"),
   // OTLP log export (e.g. PostHog Logs: url https://us.i.posthog.com/i/v1/logs, headers
   // `Authorization=Bearer <phc_ project token>`). Headers use the OTEL convention

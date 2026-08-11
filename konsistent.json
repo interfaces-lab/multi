@@ -7,7 +7,8 @@
       "description": "Post-cut boundary: app and desktop must use shared/core surfaces instead of the deleted contracts package.",
       "paths": ["packages/app/src/**/*.{ts,tsx}", "packages/desktop/src/**/*.{ts,tsx}"],
       "mustNot": {
-        "importFrom": "@honk/contracts"
+        "importValuesFrom": "@honk/contracts",
+        "importTypesFrom": "@honk/contracts"
       }
     },
     {
@@ -15,7 +16,8 @@
       "description": "Post-cut boundary: app and desktop must not import the deleted runtime package.",
       "paths": ["packages/app/src/**/*.{ts,tsx}", "packages/desktop/src/**/*.{ts,tsx}"],
       "mustNot": {
-        "importFrom": "@honk/runtime"
+        "importValuesFrom": "@honk/runtime",
+        "importTypesFrom": "@honk/runtime"
       }
     },
     {
@@ -23,13 +25,14 @@
       "description": "Post-cut boundary: app and desktop must not import the deleted client-runtime package.",
       "paths": ["packages/app/src/**/*.{ts,tsx}", "packages/desktop/src/**/*.{ts,tsx}"],
       "mustNot": {
-        "importFrom": "@honk/client-runtime"
+        "importValuesFrom": "@honk/client-runtime",
+        "importTypesFrom": "@honk/client-runtime"
       }
     },
     {
       "name": "public-source-indexes-are-barrels",
       "description": "Public package indexes stay declarative; implementation belongs in named modules.",
-      "paths": ["packages/opencode/src/index.ts", "packages/ui/src/index.ts"],
+      "paths": "packages/ui/src/index.ts",
       "must": {
         "areBarrelFiles": true
       }
@@ -58,7 +61,7 @@
             "files": ["index.web.tsx", "index.native.tsx"]
           },
           "must": {
-            "export": ["${component.toPascalCase()}"],
+            "exportValues": ["${component.toPascalCase()}"],
             "exportTypes": [
               {
                 "name": "${component.toPascalCase()}Props",
@@ -88,160 +91,12 @@
       ]
     },
     {
-      "name": "opencode-package-entrypoints",
-      "description": "@honk/opencode keeps one explicit client boundary with separate host and native adapters.",
-      "paths": "packages/opencode",
-      "must": {
-        "haveType": "directory",
-        "haveFiles": [
-          "src/index.ts",
-          "src/client.ts",
-          "src/connection.ts",
-          "src/event-stream.ts",
-          "src/identity.ts",
-          "src/registry.ts",
-          "src/host.ts",
-          "src/native.ts"
-        ]
-      }
-    },
-    {
-      "name": "opencode-host-plugin-shape",
-      "description": "The generated OpenCode host plugin keeps behavior, shared types, agents, pairing, and tool hooks in named modules.",
-      "paths": "packages/opencode/src/host-plugin",
-      "must": {
-        "haveType": "directory",
-        "haveFiles": [
-          "index.ts",
-          "types.ts",
-          "agents.ts",
-          "pairing.ts",
-          "parent-chat.ts",
-          "mcp-server.mjs"
-        ]
-      }
-    },
-    {
-      "name": "opencode-native-entrypoint-contract",
-      "description": "The native adapter exposes the same event-stream factory contract consumed by the shared client.",
-      "paths": "packages/opencode/src/native.ts",
-      "must": {
-        "export": ["nativeOpenCodeEventSource"],
-        "importTypes": [
-          {
-            "name": "OpenCodeEventSourceFactory",
-            "from": "./event-stream"
-          }
-        ]
-      }
-    },
-    {
-      "name": "opencode-client-contract",
-      "description": "The OpenCode client keeps a small PI-like explicit surface instead of leaking SDK implementation details.",
-      "paths": "packages/opencode/src/client.ts",
-      "must": {
-        "export": [
-          "createOpenCodeClient",
-          "OPEN_CODE_CAPABILITIES",
-          "OPEN_CODE_SESSION_CAPABILITIES",
-          "OpenCodeRequestError"
-        ],
-        "exportTypes": ["OpenCodeClient", "OpenCodeClientOptions"]
-      }
-    },
-    {
-      "name": "opencode-event-source-contract",
-      "description": "Web and native event transports implement one renderer-neutral event-source contract.",
-      "paths": "packages/opencode/src/event-stream.ts",
-      "must": {
-        "exportTypes": ["OpenCodeEventSourceInput", "OpenCodeEventSourceFactory"]
-      }
-    },
-    {
-      "name": "opencode-connection-contract",
-      "description": "Connection parsing and pairing remain explicit named APIs at the OpenCode boundary.",
-      "paths": "packages/opencode/src/connection.ts",
-      "must": {
-        "export": [
-          "normalizeOpenCodeOrigin",
-          "openCodeAuthorizationHeader",
-          "probeOpenCodeConnection",
-          "parseOpenCodeConnection",
-          "createOpenCodeAttachUrl",
-          "exchangeHonkPairing"
-        ],
-        "exportTypes": ["OpenCodeFetch", "OpenCodeConnection", "OpenCodeConnectionCandidate"]
-      }
-    },
-    {
-      "name": "opencode-host-entrypoint-contract",
-      "description": "The host entrypoint keeps its config builder and managed plugin constants explicit.",
-      "paths": "packages/opencode/src/host.ts",
-      "must": {
-        "export": [
-          "HONK_OPENCODE_PLUGIN_DIRECTORY",
-          "HONK_OPENCODE_PLUGIN_ENTRY_FILE",
-          "HONK_OPENCODE_DEFAULT_PLUGINS",
-          "buildHonkOpencodeConfig"
-        ],
-        "exportTypes": ["HonkOpencodeConfig"]
-      }
-    },
-    {
-      "name": "opencode-host-plugin-entrypoint-contract",
-      "description": "The generated host plugin preserves OpenCode's explicit id, setup, and server hooks.",
-      "paths": "packages/opencode/src/host-plugin/index.ts",
-      "must": {
-        "export": ["id", "setup", "server"]
-      }
-    },
-    {
-      "name": "opencode-boundary-must-not-import-effect-barrel",
-      "description": "@honk/opencode remains a transport boundary instead of becoming a second Effect runtime.",
-      "paths": "packages/opencode/src/**/*.{ts,tsx}",
-      "mustNot": {
-        "importFrom": "effect"
-      }
-    },
-    {
-      "name": "opencode-boundary-must-not-import-effect-modules",
-      "description": "@honk/opencode remains a transport boundary instead of becoming a second Effect runtime.",
-      "paths": "packages/opencode/src/**/*.{ts,tsx}",
-      "mustNot": {
-        "importFrom": "effect/*"
-      }
-    },
-    {
-      "name": "opencode-boundary-must-not-import-pi",
-      "description": "PI is an implementation reference, not a second client protocol inside @honk/opencode.",
-      "paths": "packages/opencode/src/**/*.{ts,tsx}",
-      "mustNot": {
-        "importFrom": "@earendil-works/*"
-      }
-    },
-    {
-      "name": "browser-clients-must-not-relax-transport-security",
-      "description": "The native origin policy allows cleartext HTTP to private addresses; browser surfaces stay HTTPS-only. Expo web is unsupported today, so revisit this boundary before adding it.",
-      "paths": ["packages/app/src/**/*.{ts,tsx}", "packages/desktop/src/**/*.{ts,tsx}"],
-      "mustNot": {
-        "importFrom": "@honk/opencode/connection-native"
-      }
-    },
-    {
-      "name": "mobile-origin-policy-has-one-seam",
-      "description": "Mobile origin validation routes through src/pairing.ts so the cleartext allowance stays reviewable.",
-      "paths": ["packages/mobile/src/**/*.{ts,tsx}", "packages/mobile/app/**/*.{ts,tsx}"],
-      "excludeFiles": ["packages/mobile/src/pairing.ts"],
-      "mustNot": {
-        "importFrom": "@honk/opencode/connection-native"
-      }
-    },
-    {
       "name": "shared-contracts-must-not-import-opencode-sdk",
       "description": "Representation-neutral shared contracts do not leak the upstream OpenCode SDK.",
       "paths": "packages/shared/src/**/*.{ts,tsx}",
       "mustNot": {
-        "importFrom": "@opencode-ai/*"
+        "importValuesFrom": "@opencode-ai/*",
+        "importTypesFrom": "@opencode-ai/*"
       }
     },
     {
@@ -249,7 +104,8 @@
       "description": "Representation-neutral shared contracts do not depend on PI implementation packages.",
       "paths": "packages/shared/src/**/*.{ts,tsx}",
       "mustNot": {
-        "importFrom": "@earendil-works/*"
+        "importValuesFrom": "@earendil-works/*",
+        "importTypesFrom": "@earendil-works/*"
       }
     }
   ]

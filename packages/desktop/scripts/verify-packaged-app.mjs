@@ -37,15 +37,11 @@ function fail(message) {
 export async function verifyPackagedApp(appPath) {
   const appRoot = resolve(appPath);
   const isMac = appRoot.endsWith(".app");
-  // Official Linux and Windows OpenCode executables are roughly 30–40 MiB larger than macOS.
-  const maxAppBytes = (isMac ? 400 : 500) * MEBIBYTE;
-  const maxOpencodeBytes = (isMac ? 140 : 175) * MEBIBYTE;
+  const maxAppBytes = (isMac ? 260 : 325) * MEBIBYTE;
   const resourcesDir = isMac ? join(appRoot, "Contents", "Resources") : join(appRoot, "resources");
   const asarPath = join(resourcesDir, "app.asar");
-  const opencodePath = join(resourcesDir, "opencode", "bin", "opencode.exe");
   const appBytes = await totalFileBytes(appRoot);
   const asarBytes = (await lstat(asarPath)).size;
-  const opencodeBytes = (await lstat(opencodePath)).size;
   const appFiles = await filesUnder(appRoot);
   const asarEntries = listPackage(asarPath);
   const rendererIndexEntry = "/out/renderer/index.html";
@@ -75,11 +71,6 @@ export async function verifyPackagedApp(appPath) {
   }
   if (asarBytes > MAX_ASAR_BYTES) {
     fail(`app.asar is ${formatMebibytes(asarBytes)}; budget is ${formatMebibytes(MAX_ASAR_BYTES)}`);
-  }
-  if (opencodeBytes > maxOpencodeBytes) {
-    fail(
-      `OpenCode is ${formatMebibytes(opencodeBytes)}; budget is ${formatMebibytes(maxOpencodeBytes)}`,
-    );
   }
   if (localeBytes > MAX_LOCALE_BYTES || locales.length > 2) {
     fail(`Electron locales are ${formatMebibytes(localeBytes)} across ${locales.length} entries`);
@@ -117,7 +108,6 @@ export async function verifyPackagedApp(appPath) {
   const forbiddenAsarEntries = asarEntries.filter((entry) =>
     [
       /^\/node_modules\/playwright-core(?:\/|$)/,
-      /^\/node_modules\/opencode-ai(?:\/|$)/,
       /^\/out\/core(?:\/|$)/,
       /^\/resources\/dmg-background/,
       /^\/resources\/entitlements\.plist$/,
@@ -159,7 +149,6 @@ export async function verifyPackagedApp(appPath) {
       `Packaged app verified: ${appRoot}`,
       `  app: ${formatMebibytes(appBytes)} / ${formatMebibytes(maxAppBytes)}`,
       `  app.asar: ${formatMebibytes(asarBytes)} / ${formatMebibytes(MAX_ASAR_BYTES)}`,
-      `  OpenCode: ${formatMebibytes(opencodeBytes)} / ${formatMebibytes(maxOpencodeBytes)}`,
       `  Electron locales: ${formatMebibytes(localeBytes)} (${locales.join(", ")})`,
       `  Web client: index plus ${rendererAssets.length} assets`,
       `  runtime packages: ${[...runtimePackages].sort().join(", ")}`,

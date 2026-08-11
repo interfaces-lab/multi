@@ -7,7 +7,7 @@ import { makeIpcMethod } from "../desktop-ipc";
 
 export const reportStartupMilestone = makeIpcMethod({
   channel: IpcChannels.REPORT_STARTUP_MILESTONE_CHANNEL,
-  payload: Schema.Literals(["renderer-sidecar-ready", "renderer-authenticated"]),
+  payload: Schema.Literals(["renderer-authenticated"]),
   result: Schema.Void,
   trace: false,
   handler: Effect.fnUntraced(function* (milestone) {

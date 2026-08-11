@@ -1,15 +1,18 @@
-// The chat session store, in the same shape as connection-store and client.ts:
-// the watch subscription and the reducer fold live at module level so
-// components stay effect-free — surfaces read one stable snapshot through
-// useSyncExternalStore. One handle per session, refcounted; the watch closes
-// when the last surface lets go.
+// The chat session store keeps the watch subscription and reducer fold at
+// module level so components stay effect-free. Surfaces read one stable
+// snapshot through useSyncExternalStore. A visited desktop tab retains its
+// handle while inactive, so returning to it does not cold-load the transcript.
 
 import * as React from "react";
 
+import type { HonkClient } from "@honk/core";
 import type { Session } from "@honk/core/session";
 
+import { getSnapshot as getTabSnapshot, subscribe as subscribeTabs } from "../tab-store";
+import type { ModelChoice } from "./chat-controller";
 import type { ChatEvent, ChatState } from "./chat-model";
 import { initialState, reduce } from "./chat-model";
+import type { ComposerMessage } from "./composer-store";
 import {
   describeError,
   getHonkClient,
@@ -18,22 +21,52 @@ import {
 } from "./client";
 
 interface SessionHandle {
-  refs: number;
+  surfaceRefs: number;
+  tabRetained: boolean;
   state: ChatState;
   readonly listeners: Set<() => void>;
   stop: (() => void) | null;
 }
 
-const handles = new Map<string, SessionHandle>();
+const handles = new Map<Session.SessionId, SessionHandle>();
+const visitedTabs = new Set<Session.SessionId>();
 
 function handleOf(sessionId: Session.SessionId): SessionHandle {
   let handle = handles.get(sessionId);
   if (handle === undefined) {
-    handle = { refs: 0, state: initialState, listeners: new Set(), stop: null };
+    handle = {
+      surfaceRefs: 0,
+      tabRetained: false,
+      state: initialState,
+      listeners: new Set(),
+      stop: null,
+    };
     handles.set(sessionId, handle);
   }
   return handle;
 }
+
+function disposeHandle(sessionId: Session.SessionId, handle: SessionHandle): void {
+  handle.stop?.();
+  handle.stop = null;
+  handles.delete(sessionId);
+  visitedTabs.delete(sessionId);
+}
+
+function tabIsOpen(sessionId: Session.SessionId): boolean {
+  return getTabSnapshot().tabs.includes(sessionId);
+}
+
+function reconcileTabRetention(): void {
+  for (const [sessionId, handle] of handles) {
+    handle.tabRetained = visitedTabs.has(sessionId) && tabIsOpen(sessionId);
+    if (handle.surfaceRefs === 0 && !handle.tabRetained) {
+      disposeHandle(sessionId, handle);
+    }
+  }
+}
+
+subscribeTabs(reconcileTabRetention);
 
 function dispatch(handle: SessionHandle, event: ChatEvent): void {
   const next = reduce(handle.state, event);
@@ -50,7 +83,7 @@ function dispatch(handle: SessionHandle, event: ChatEvent): void {
 function startWatch(
   handle: SessionHandle,
   sessionId: Session.SessionId,
-  client: NonNullable<ReturnType<typeof getHonkClient>>,
+  client: HonkClient,
 ): () => void {
   let disposed = false;
   const frames = client.session.watch({ sessionId })[Symbol.asyncIterator]();
@@ -63,7 +96,7 @@ function startWatch(
         dispatch(
           handle,
           frame.type === "state"
-            ? { type: "state", entries: frame.entries, status: frame.status, turns: frame.turns }
+            ? { type: "state", entries: frame.entries, phase: frame.phase, turns: frame.turns }
             : { type: "event", event: frame.event },
         );
       }
@@ -84,8 +117,8 @@ function startWatch(
  */
 export function retainSession(sessionId: Session.SessionId): () => void {
   const handle = handleOf(sessionId);
-  handle.refs += 1;
-  if (handle.refs === 1) {
+  handle.surfaceRefs += 1;
+  if (handle.stop === null) {
     let stopWatch: (() => void) | null = null;
     let unsubscribe: (() => void) | null = null;
     const tryStart = (): boolean => {
@@ -113,40 +146,77 @@ export function retainSession(sessionId: Session.SessionId): () => void {
       stopWatch?.();
     };
   }
+  let released = false;
   return () => {
-    handle.refs -= 1;
-    if (handle.refs === 0) {
-      handle.stop?.();
-      handles.delete(sessionId);
+    if (released) return;
+    released = true;
+    handle.surfaceRefs -= 1;
+    if (handle.surfaceRefs === 0 && !handle.tabRetained) {
+      disposeHandle(sessionId, handle);
     }
   };
 }
 
-export interface CoreChat {
-  readonly state: ChatState;
-  readonly prompt: (text: string) => Promise<void>;
-  readonly steer: (text: string) => Promise<void>;
-  readonly stop: () => Promise<void>;
-  /** Starts an agent-driven Git action; the transcript shows it as a chip. */
-  readonly runGitAction: (action: Session.GitActionId) => Promise<void>;
+/** Keeps an already-visited top-level tab live while its route is inactive. */
+export function markSessionTabVisited(sessionId: Session.SessionId): void {
+  if (!tabIsOpen(sessionId)) return;
+  visitedTabs.add(sessionId);
+  handleOf(sessionId).tabRetained = true;
 }
 
-function command(
-  sessionId: Session.SessionId,
-  run: (client: NonNullable<ReturnType<typeof getHonkClient>>) => Promise<unknown>,
-): Promise<void> {
-  const client = getHonkClient();
-  if (client === null) return Promise.resolve();
-  return run(client).then(
-    () => undefined,
-    (error: unknown) => {
-      const handle = handles.get(sessionId);
-      if (handle !== undefined) {
-        dispatch(handle, { type: "failed", message: describeError(error) });
-      }
-      throw error;
+export interface CoreChat {
+  readonly state: ChatState;
+  readonly prompt: (message: ComposerMessage) => Promise<void>;
+  readonly editMessage: (
+    entryId: string,
+    message: ComposerMessage,
+    selection?: {
+      readonly model?: ModelChoice;
+      readonly thinkingLevel: Session.ThinkingLevel;
     },
-  );
+  ) => Promise<void>;
+  readonly steer: (message: ComposerMessage) => Promise<void>;
+  /**
+   * Queues text for after the current run (contract.ts FollowUp). Settles
+   * through the events stream: Pi answers with a `queue_update` frame and
+   * the reducer folds it into the tray.
+   */
+  readonly followUp: (message: ComposerMessage) => Promise<void>;
+  /**
+   * Ends the run and resolves with the queued messages Pi cleared, so the
+   * composer can put the user's words back in the editor (contract.ts Abort).
+   */
+  readonly stop: () => Promise<Session.AbortOutput>;
+  /** Starts an agent-driven Git action; the transcript shows it as a chip. */
+  readonly runGitAction: (action: Session.GitActionId) => Promise<void>;
+  /**
+   * Sets the thinking level. No optimistic dispatch: Pi answers with
+   * a `thinking_level_update` event and the reducer folds it in.
+   */
+  readonly setThinkingLevel: (level: Session.ThinkingLevel) => Promise<void>;
+  /**
+   * Moves the session to another model. Same shape as the level above: core
+   * resolves the reference, Pi answers with a `model_update` event, and the
+   * reducer folds the truth back.
+   */
+  readonly setModel: (model: ModelChoice) => Promise<void>;
+}
+
+const disconnected = (): Promise<never> =>
+  Promise.reject(new Error("Honk Core is not connected yet."));
+
+// RPC refusals belong to the control that initiated them. Session health
+// comes only from the watch; a busy prompt or late abort cannot poison a live
+// authoritative stream.
+function invoke<A>(run: (client: HonkClient) => Promise<A>): Promise<A> {
+  const client = getHonkClient();
+  if (client === null) return disconnected();
+  return run(client);
+}
+
+/** The store's read outside React: the fold so far, initial before attach. */
+export function sessionStateOf(sessionId: Session.SessionId): ChatState {
+  return handles.get(sessionId)?.state ?? initialState;
 }
 
 /** Attaches to a session: the store folds, the component only reads. */
@@ -160,23 +230,27 @@ export function useCoreSession(sessionId: Session.SessionId): CoreChat {
         handle.listeners.delete(onStoreChange);
       };
     },
-    () => handles.get(sessionId)?.state ?? initialState,
+    () => sessionStateOf(sessionId),
     () => initialState,
   );
 
   return {
     state,
-    prompt: (text) => {
-      const handle = handles.get(sessionId);
-      if (handle !== undefined) dispatch(handle, { type: "prompted" });
-      return command(sessionId, (client) => client.session.prompt({ sessionId, text }));
-    },
-    steer: (text) => command(sessionId, (client) => client.session.steer({ sessionId, text })),
-    stop: () => command(sessionId, (client) => client.session.abort({ sessionId })),
-    runGitAction: (action) => {
-      const handle = handles.get(sessionId);
-      if (handle !== undefined) dispatch(handle, { type: "prompted" });
-      return command(sessionId, (client) => client.session.runGitAction({ sessionId, action }));
-    },
+    prompt: (message) => invoke((client) => client.session.prompt({ sessionId, ...message })),
+    // The edit form owns its pending and error state. Core may refuse a stale
+    // entry or a run that became busy; neither refusal makes the live session
+    // untrustworthy, and Pi's tree/agent events drive the successful branch.
+    editMessage: (entryId, message, selection) =>
+      invoke((client) =>
+        client.session.editMessage({ sessionId, entryId, ...message, ...selection }),
+      ),
+    steer: (message) => invoke((client) => client.session.steer({ sessionId, ...message })),
+    followUp: (message) => invoke((client) => client.session.followUp({ sessionId, ...message })),
+    stop: () => invoke((client) => client.session.abort({ sessionId })),
+    runGitAction: (action) =>
+      invoke((client) => client.session.runGitAction({ sessionId, action })),
+    setThinkingLevel: (level) =>
+      invoke((client) => client.session.setThinkingLevel({ sessionId, thinkingLevel: level })),
+    setModel: (model) => invoke((client) => client.session.setModel({ sessionId, model })),
   };
 }

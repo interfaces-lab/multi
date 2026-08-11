@@ -4,10 +4,8 @@ import { IconConsoleSimple, IconFileBend, IconGlobe } from "@honk/ui/icons";
 import { colorVars, spaceVars } from "@honk/ui/tokens.stylex";
 import * as React from "react";
 
-import type { SubmittedPlanRecord } from "./thread/follow-up";
-import type { PlanExecutionProjection } from "./thread/plan-execution";
-import type { ToolTodo } from "./tool-part-projection";
 import { WORKBENCH_WIDTH_MIN } from "./workbench-controller";
+import type { WorkbenchSessionRef } from "./workbench-frame";
 import { workbenchPanelLayout, workbenchPanelSize } from "./workbench-panel-layout.stylex";
 import { WorkbenchPanelSurface } from "./workbench-panel-surface";
 import type { WorkbenchTab as ManagedWorkbenchTab } from "./workbench-tab-store";
@@ -48,6 +46,7 @@ const styles = stylex.create({
 type WorkbenchPanelColumnProps = {
   readonly activeTabID: string | null;
   readonly availablePanelWidth: number;
+  readonly sessionRef: WorkbenchSessionRef;
   readonly directory: string;
   readonly headerMenuItems: readonly WorkbenchToolHeaderMenuItem[];
   readonly headerTabs: readonly WorkbenchToolHeaderTab[];
@@ -55,19 +54,13 @@ type WorkbenchPanelColumnProps = {
   readonly isOpen: boolean;
   readonly isResizing: boolean;
   readonly isThreadRunning: boolean;
-  readonly buildAgent: string;
   readonly managedTabs: readonly ManagedWorkbenchTab[];
   readonly panelWidth: number;
-  readonly plan: SubmittedPlanRecord | null;
-  readonly planExecution: PlanExecutionProjection | null;
-  readonly tasks: readonly ToolTodo[];
   readonly onActivateTab: (id: string) => void;
   readonly onCloseTab: (id: string) => void;
   readonly onCreateItem: (id: string) => void;
   readonly onOpenFile: (path: string) => void;
   readonly onSearchFiles: (query: string) => Promise<readonly string[]>;
-  readonly onOpenChanges: () => void;
-  readonly onOpenTasks: () => void;
   readonly onToggleMaximized: () => void;
   readonly onSashKeyDown: (event: React.KeyboardEvent<HTMLDivElement>) => void;
   readonly onSashPointerDown: (event: React.PointerEvent<HTMLDivElement>) => void;
@@ -78,6 +71,7 @@ type WorkbenchPanelColumnProps = {
 function WorkbenchPanelColumn({
   activeTabID,
   availablePanelWidth,
+  sessionRef,
   directory,
   headerMenuItems,
   headerTabs,
@@ -85,19 +79,13 @@ function WorkbenchPanelColumn({
   isOpen,
   isResizing,
   isThreadRunning,
-  buildAgent,
   managedTabs,
   panelWidth,
-  plan,
-  planExecution,
-  tasks,
   onActivateTab,
   onCloseTab,
   onCreateItem,
   onOpenFile,
   onSearchFiles,
-  onOpenChanges,
-  onOpenTasks,
   onToggleMaximized,
   onSashKeyDown,
   onSashPointerDown,
@@ -166,16 +154,11 @@ function WorkbenchPanelColumn({
             <div key={tab.id} {...stylex.props(styles.panelHost, !visible && styles.hidden)}>
               <WorkbenchPanelSurface
                 tab={tab}
+                sessionRef={sessionRef}
                 directory={directory}
                 isThreadRunning={isThreadRunning}
-                buildAgent={buildAgent}
                 isVisible={visible}
-                plan={plan}
-                planExecution={planExecution}
-                tasks={tasks}
                 onOpenFile={onOpenFile}
-                onReviewChanges={onOpenChanges}
-                onViewPlan={onOpenTasks}
               />
             </div>
           );

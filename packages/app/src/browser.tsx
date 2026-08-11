@@ -1,6 +1,7 @@
 import * as stylex from "@stylexjs/stylex";
-import type { OpenCodeSessionRef } from "@honk/opencode";
+import type { Session } from "@honk/core/session";
 import { ThreadId } from "@honk/shared/base-schemas";
+import type { DesktopBrowserViewState } from "@honk/shared/desktop-api";
 import { Field, Icon, IconButton, Spinner, Text, Tooltip } from "@honk/ui";
 import {
   IconArrowLeft,
@@ -29,21 +30,20 @@ const styles = stylex.create({
 });
 
 function DesktopBrowserSurface({
-  sessionRef,
+  sessionId,
   directory,
   resourceID = "default",
   browserBridge,
   isVisible = true,
 }: {
-  readonly sessionRef: OpenCodeSessionRef;
+  readonly sessionId: Session.SessionId;
   readonly directory: string;
   readonly resourceID?: string;
   readonly browserBridge: DesktopBrowserBridge;
   readonly isVisible?: boolean;
 }): React.ReactElement {
-  const { sessionID } = sessionRef;
-  const browserId = browserResourceID(sessionRef, resourceID);
-  const resource = browserResourceFor(sessionRef, resourceID);
+  const browserId = browserResourceID(sessionId, resourceID);
+  const resource = browserResourceFor(sessionId, resourceID);
   const snapshot = React.useSyncExternalStore(
     resource.subscribe,
     resource.getSnapshot,
@@ -58,7 +58,7 @@ function DesktopBrowserSurface({
   const { syncBrowserView, detachBrowserView, commandBrowserView } = browserBridge;
   const hasPage = snapshot.committedUrl.length > 0 || snapshot.isLoading;
 
-  const applyState = (state: Parameters<typeof applyBrowserViewState>[0]): void => {
+  const applyState = (state: DesktopBrowserViewState): void => {
     if (state.browserId === browserId) applyBrowserViewState(state);
   };
 
@@ -89,7 +89,7 @@ function DesktopBrowserSurface({
       surfaceId,
       workspaceKey: directory,
       tabId: `browser:${browserId}`,
-      threadId: ThreadId.make(sessionID),
+      threadId: ThreadId.make(sessionId),
       bounds: {
         x: bounds.left,
         y: bounds.top,
@@ -174,7 +174,7 @@ function DesktopBrowserSurface({
           type: "error",
           title: "Picture in Picture failed",
           description: errorMessage(cause),
-          threadKey: sessionID,
+          threadKey: sessionId,
         });
       });
   };
@@ -263,12 +263,12 @@ function DesktopBrowserSurface({
 }
 
 function BrowserSurface({
-  sessionRef,
+  sessionId,
   directory,
   resourceID = "default",
   isVisible = true,
 }: {
-  readonly sessionRef: OpenCodeSessionRef;
+  readonly sessionId: Session.SessionId;
   readonly directory: string;
   readonly resourceID?: string;
   readonly isVisible?: boolean;
@@ -277,7 +277,7 @@ function BrowserSurface({
   if (availability.status === "ready") {
     return (
       <DesktopBrowserSurface
-        sessionRef={sessionRef}
+        sessionId={sessionId}
         directory={directory}
         resourceID={resourceID}
         browserBridge={availability.bridge}

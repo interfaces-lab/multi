@@ -1,4 +1,4 @@
-import type { OpenCodeServerKey } from "@honk/opencode";
+import type { Workspace } from "@honk/core/workspace";
 import { Spinner, Text } from "@honk/ui";
 import { borderVars, colorVars, fontVars, radiusVars, spaceVars } from "@honk/ui/tokens.stylex";
 import * as stylex from "@stylexjs/stylex";
@@ -123,15 +123,13 @@ function DecodedImage({ src, path }: { readonly src: string; readonly path: stri
 }
 
 function WorkbenchChangesImage({
-  server,
-  directory,
+  workspaceId,
   path,
 }: {
-  readonly server: OpenCodeServerKey;
-  readonly directory: string;
+  readonly workspaceId: Workspace.WorkspaceId;
   readonly path: string;
 }): React.ReactElement {
-  const snapshot = useImagePreview(server, directory, path);
+  const snapshot = useImagePreview(workspaceId, path);
   if (snapshot.phase === "loading") {
     return (
       <div {...stylex.props(styles.root)}>

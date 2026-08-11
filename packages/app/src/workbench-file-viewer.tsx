@@ -1,32 +1,30 @@
-import {
-  OpenCodeRequestError,
-  type OpenCodeClient,
-  type OpenCodeFileContent,
-} from "@honk/opencode";
-import { normalizePathSeparators } from "@honk/shared/paths";
+import { Files, type HonkClient } from "@honk/core";
+import type { Workspace } from "@honk/core/workspace";
 import { Button, Icon, IconButton, Spinner, Text } from "@honk/ui";
 import { IconArrowRotateClockwise } from "@honk/ui/icons";
 import { colorVars, fontVars, spaceVars } from "@honk/ui/tokens.stylex";
 import * as stylex from "@stylexjs/stylex";
 import * as React from "react";
 
+import { getHonkClient } from "./chat/client";
 import { errorMessage } from "./error-message";
-import { getBoundOpenCodeClient } from "./watch-registry";
 
-// The filesystem read is byte-accurate and edits are persisted as contextual patches. The patch
-// protects concurrent agent/user changes in the edited region instead of replacing the whole file.
+// The filesystem read is byte-accurate: core reads bytes and decodes, so a binary file is reported
+// as binary rather than rendered as replacement characters. Saving overwrites the whole file —
+// `files.write` is core's one write route — so the editor tracks the text it loaded and surfaces
+// "Changed on disk" instead of silently clobbering a concurrent agent edit.
 
 const FILE_VIEWER_RESOURCE_GRACE_MS = 30_000;
 // Render cost scales with characters, not bytes on disk, so the cap is measured on what was decoded.
 const FILE_VIEWER_MAX_CHARACTERS = 2_000_000;
-const NOT_CONNECTED_MESSAGE = "Honk is not connected to OpenCode.";
+const NOT_CONNECTED_MESSAGE = "Honk Core is not connected yet.";
 
 type FileViewerState =
   | { readonly phase: "loading" }
   | { readonly phase: "ready"; readonly text: string }
   | { readonly phase: "empty" }
   | { readonly phase: "missing" }
-  | { readonly phase: "binary"; readonly mimeType: string | undefined }
+  | { readonly phase: "binary"; readonly sizeBytes: number }
   | { readonly phase: "oversized"; readonly characters: number }
   | { readonly phase: "error"; readonly message: string };
 
@@ -34,20 +32,22 @@ type FileViewerResource = {
   readonly getSnapshot: () => FileViewerState;
   readonly subscribe: (listener: () => void) => () => void;
   readonly refresh: () => void;
-  readonly save: (expectedContents: string, contents: string) => Promise<void>;
+  readonly save: (contents: string) => Promise<void>;
   readonly observeThreadRunning: (isRunning: boolean) => void;
 };
 
-type FileViewerClient = Pick<OpenCodeClient, "files">;
+type FileViewerClient = {
+  readonly files: Pick<HonkClient["files"], "read" | "write">;
+};
 type FileViewerClientResolver = () => FileViewerClient | null;
 
 const LOADING_STATE: FileViewerState = Object.freeze({ phase: "loading" });
 const fileViewerResources = new Map<string, FileViewerResource>();
 
 function createFileViewerResource(
-  directory: string,
+  workspaceId: Workspace.WorkspaceId,
   path: string,
-  resolveClient: FileViewerClientResolver = getBoundOpenCodeClient,
+  resolveClient: FileViewerClientResolver = getHonkClient,
 ): FileViewerResource {
   let snapshot = LOADING_STATE;
   let requested = false;
@@ -75,7 +75,7 @@ function createFileViewerResource(
     // run that rewrote the file swaps the content in place.
     const preservesContent = snapshot.phase === "ready" || snapshot.phase === "empty";
     if (!preservesContent) publish(LOADING_STATE);
-    void readFileState(client, directory, path).then(
+    void readFileState(client, workspaceId, path).then(
       (state) => {
         if (currentGeneration !== generation) return;
         publish(state);
@@ -102,16 +102,16 @@ function createFileViewerResource(
         listeners.delete(listener);
         if (listeners.size === 0) {
           releaseTimer = setTimeout(() => {
-            if (listeners.size === 0) fileViewerResources.delete(resourceKey(directory, path));
+            if (listeners.size === 0) fileViewerResources.delete(resourceKey(workspaceId, path));
           }, FILE_VIEWER_RESOURCE_GRACE_MS);
         }
       };
     },
     refresh,
-    async save(expectedContents, contents) {
+    async save(contents) {
       const client = resolveClient();
       if (client === null) throw new Error(NOT_CONNECTED_MESSAGE);
-      await client.files.write(path, { expectedContents, contents }, { directory });
+      await client.files.write({ workspaceId, path, content: contents });
     },
     observeThreadRunning(isRunning) {
       // The agent may have rewritten this file during the run that just finished.
@@ -123,28 +123,18 @@ function createFileViewerResource(
 
 async function readFileState(
   client: FileViewerClient,
-  directory: string,
+  workspaceId: Workspace.WorkspaceId,
   path: string,
 ): Promise<FileViewerState> {
-  let content: OpenCodeFileContent;
+  let content: Awaited<ReturnType<FileViewerClient["files"]["read"]>>;
   try {
-    content = await client.files.read(path, { directory });
+    content = await client.files.read({ workspaceId, path });
   } catch (error) {
-    if (error instanceof OpenCodeRequestError && error.status === 404) {
-      return { phase: "missing" };
-    }
-    // The pinned raw endpoint currently turns a missing real path into a generic
-    // server failure. Check the parent only on failure so empty files stay a
-    // single-request fast path while deleted files still get a precise state.
-    try {
-      if (!(await fileExists(client, directory, path))) return { phase: "missing" };
-    } catch {
-      // Preserve the original, more relevant read failure when listing also fails.
-    }
+    if (error instanceof Files.NotFoundError) return { phase: "missing" };
     throw error;
   }
-  if (content.kind === "binary") {
-    return { phase: "binary", mimeType: content.mimeType };
+  if (content.type === "binary") {
+    return { phase: "binary", sizeBytes: content.size };
   }
   if (content.text.length > FILE_VIEWER_MAX_CHARACTERS) {
     return { phase: "oversized", characters: content.text.length };
@@ -152,28 +142,18 @@ async function readFileState(
   return content.text.length > 0 ? { phase: "ready", text: content.text } : { phase: "empty" };
 }
 
-async function fileExists(
-  client: FileViewerClient,
-  directory: string,
+function resourceKey(workspaceId: Workspace.WorkspaceId, path: string): string {
+  return `${workspaceId}\n${path}`;
+}
+
+function fileViewerResourceFor(
+  workspaceId: Workspace.WorkspaceId,
   path: string,
-): Promise<boolean> {
-  const separator = path.lastIndexOf("/");
-  const parent = separator < 0 ? "" : path.slice(0, separator);
-  const listed = await client.files.list(parent === "" ? undefined : parent, { directory });
-  return listed.data.some(
-    (entry) => normalizePathSeparators(entry.path).replace(/\/+$/, "") === path,
-  );
-}
-
-function resourceKey(directory: string, path: string): string {
-  return `${directory}\n${path}`;
-}
-
-function fileViewerResourceFor(directory: string, path: string): FileViewerResource {
-  const key = resourceKey(directory, path);
+): FileViewerResource {
+  const key = resourceKey(workspaceId, path);
   const existing = fileViewerResources.get(key);
   if (existing !== undefined) return existing;
-  const created = createFileViewerResource(directory, path);
+  const created = createFileViewerResource(workspaceId, path);
   fileViewerResources.set(key, created);
   return created;
 }
@@ -277,16 +257,16 @@ const PierreFileView = React.lazy(async () => {
 
 function WorkbenchFileViewer({
   path,
-  directory,
+  workspaceId,
   isThreadRunning,
   isVisible,
 }: {
   readonly path: string;
-  readonly directory: string;
+  readonly workspaceId: Workspace.WorkspaceId;
   readonly isThreadRunning: boolean;
   readonly isVisible: boolean;
 }): React.ReactElement {
-  const resource = fileViewerResourceFor(directory, path);
+  const resource = fileViewerResourceFor(workspaceId, path);
   const state = React.useSyncExternalStore(
     resource.subscribe,
     resource.getSnapshot,
@@ -303,7 +283,7 @@ function WorkbenchFileViewer({
   if (wasVisible && (state.phase === "ready" || state.phase === "empty")) {
     return (
       <EditableWorkbenchFile
-        key={resourceKey(directory, path)}
+        key={resourceKey(workspaceId, path)}
         path={path}
         sourceText={state.phase === "ready" ? state.text : ""}
         resource={resource}
@@ -389,11 +369,10 @@ function EditableWorkbenchFile({
   const save = async (): Promise<void> => {
     const current = session;
     if (current.savePhase === "saving" || current.draftText === current.baseText) return;
-    const expectedContents = current.baseText;
     const contents = current.draftText;
     setSession(({ saveError: _saveError, ...value }) => ({ ...value, savePhase: "saving" }));
     try {
-      await resource.save(expectedContents, contents);
+      await resource.save(contents);
       setSession(({ saveError: _saveError, ...value }) => ({
         ...value,
         baseText: contents,
@@ -567,11 +546,7 @@ function FileViewerBody({
     return (
       <FileViewerNotice
         title="Binary file"
-        detail={
-          state.mimeType === undefined
-            ? "Honk shows text files only."
-            : `${state.mimeType} — Honk shows text files only.`
-        }
+        detail={`${formatCount(state.sizeBytes)} bytes — Honk shows text files only.`}
       />
     );
   }
